@@ -90,11 +90,6 @@ def trend_code(closes):
         return None
 
 
-def trend_text(tr, label):
-    """거래량 줄 끝에 붙는 '이 봉' 추세. 봉 이름(1시간봉 등)을 그대로 쓴다."""
-    return f"  {label} " + (TREND_LABEL[tr] if tr in TREND_LABEL else "추세 -")
-
-
 def daily_trend(inst):
     """코인의 일봉 추세(큰 틀). 코인마다 한 번만 받아 둔다."""
     if inst in DAILY:
@@ -116,15 +111,15 @@ VERDICT = {("up", "down"): "⚠️기술적 반등",
            ("down", "down"): "하락 지속"}
 
 
-def day_line(bar, tr, dt):
-    """종목 바로 아래에 나올 '일봉 추세' 줄."""
+def day_line(bar, tr, dt, label):
+    """종목 바로 아래 '일봉 추세 →알림 봉 추세' 줄과 판정 줄."""
     if dt is None:
         return "일봉 - (큰 틀 알 수 없음)"
-    t = f"일봉 {TREND_LABEL[dt]}"
     if bar in LONG_BARS:
-        return t
+        return f"일봉 {TREND_LABEL[dt]}"
+    t = f"일봉 {TREND_LABEL[dt]} →{label} " + (TREND_LABEL[tr] if tr in TREND_LABEL else "추세 -")
     v = VERDICT.get((tr, dt))
-    return t + (f" → {v}" if v else "")
+    return t + (f"\n{v}" if v else "")
 
 
 def ctx_info(cs, closes):
@@ -190,7 +185,7 @@ def stop_info(cs, price, ref=None):
 
 
 def block(name, dl, mid, vl, cl, st):
-    """알림 한 개를 여러 줄로: 티커 / 일봉 추세 / 핵심 / 거래량·추세 / 저항·낙폭 / 접는 선"""
+    """알림 한 개를 여러 줄로: 티커 / 일봉 추세 / 핵심 / 거래량 / 저항·낙폭 / 접는 선"""
     lines = [f"<b>▶ {name}</b>", dl.strip(), mid.strip(), vl.strip(), cl.strip(), st.strip()]
     return "\n".join(l for l in lines if l)
 
@@ -412,8 +407,8 @@ def main():
                 vp, vx = vol_info(cs, mode, bar, now)
                 tr = trend_code(closes)
                 rs, rname, dd = ctx_info(cs, closes)
-                vl = vol_text(vp, vx) + trend_text(tr, label)   # 거래량 + 알림 봉 추세
-                cl = ctx_text(rs, rname, dd)                    # 위 저항 + 고점 대비
+                vl = vol_text(vp, vx)                    # 거래량
+                cl = ctx_text(rs, rname, dd)             # 위 저항 + 고점 대비
 
                 found = []   # (종류, 문구, 접는 선 거리%)
                 r = rsi(closes, RSI_SIGNAL)
@@ -424,7 +419,7 @@ def main():
                         shown.append(f"{rr[-1]:.0f}" if rr else "-")
                     st, sl = stop_info(cs, closes[-1])
                     mid = f"RSI{RSI_SIGNAL} {r[-2]:.1f}→{r[-1]:.1f}  (RSI {'/'.join(shown)})  이번봉 {chg:+.1f}%"
-                    dl = day_line(bar, tr, daily_trend(inst))
+                    dl = day_line(bar, tr, daily_trend(inst), label)
                     found.append(("rsi", block(name, dl, mid, vl, cl, st), sl))
                 for n in ((7,) + EMAS if bar in LONG_BARS else EMAS):
                     e = ema(closes, n)
@@ -435,7 +430,7 @@ def main():
                         if above <= EMA_MAX_PCT:
                             st, sl = stop_info(cs, closes[-1], e[-1] * 0.998)
                             mid = f"EMA{n} 위 +{above:.1f}%  이번봉 {chg:+.1f}%"
-                            dl = day_line(bar, tr, daily_trend(inst))
+                            dl = day_line(bar, tr, daily_trend(inst), label)
                             found.append((f"ema{n}", block(name, dl, mid, vl, cl, st), sl))
 
                 # 🎯 바닥 횡보 돌파: 저점 근처 + EMA 뭉침 + EMA20 위로 첫 돌파
@@ -458,7 +453,7 @@ def main():
                                 st, sl = stop_info(cs, closes[-1], e20[-1] * 0.998)
                                 mid = (f"저점 대비 +{rise:.1f}%  EMA뭉침 {squeeze:.1f}%\n"
                                        f"최근고점 +{spike:.1f}%  이번봉 {chg:+.1f}%")
-                                dl = day_line(bar, tr, daily_trend(inst))
+                                dl = day_line(bar, tr, daily_trend(inst), label)
                                 bases.append(f"[{label}·{btag}]\n" + block(name, dl, mid, vl, cl, st))
                                 sent[bkey] = ts
                                 add_log(inst, bar, "base", mode, closes[-1], vp, vx, tr, rs, dd, sl)
