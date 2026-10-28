@@ -11,6 +11,8 @@ RSI_MAX = 40           # 반등 후 RSI6이 이 값 이하일 때만 알림 (너
 EMA_MAX_PCT = 1.0      # EMA 위로 이 % 이내일 때만 알림 (너무 오른 건 제외)
 BASE_LOOKBACK = 48     # 바닥 횡보 돌파: 저점을 볼 봉 개수
 BASE_RISE_PCT = 10     # 바닥 횡보 돌파: 저점 대비 이 % 이내일 때만
+BASE_SPIKE_BARS = 24   # 바닥 횡보 돌파: 최근 몇 봉 안에 급등 이력이 있는지 볼 개수
+BASE_SPIKE_PCT = 6     # 바닥 횡보 돌파: 최근 고점이 현재가보다 이 % 넘게 높았으면 제외 (이미 급등했다가 내려온 자리)
 SQUEEZE_PCT = 3        # 바닥 횡보 돌파: 직전 10봉 EMA7·20·50이 평균 이 % 이내로 뭉쳐 있을 때만
 WINDOW_MIN = 45        # 마감된 지 몇 분 이내의 봉만 알릴지
 BARS = [("1H", "1시간봉"), ("2H", "2시간봉"), ("4H", "4시간봉"),
@@ -143,11 +145,13 @@ def main():
                         squeeze = sum(spread) / len(spread)
                         low_n = min(float(x[3]) for x in cs[-BASE_LOOKBACK:])
                         rise = (closes[-1] / low_n - 1) * 100 if low_n > 0 else 999
-                        if squeeze <= SQUEEZE_PCT and rise <= BASE_RISE_PCT:
+                        high_n = max(float(x[2]) for x in cs[-BASE_SPIKE_BARS:])
+                        spike = (high_n / closes[-1] - 1) * 100
+                        if squeeze <= SQUEEZE_PCT and rise <= BASE_RISE_PCT and spike <= BASE_SPIKE_PCT:
                             bkey = f"{inst}|{bar}|base" + ("|live" if mode == "live" else "")
                             if sent.get(bkey) != ts:
                                 btag = "진행중" if mode == "live" else "마감확정"
-                                bases.append(f"[{label}·{btag}] {name}  저점 대비 +{rise:.1f}%  EMA뭉침 {squeeze:.1f}%  이번봉 {chg:+.1f}%")
+                                bases.append(f"[{label}·{btag}] {name}  저점 대비 +{rise:.1f}%  EMA뭉침 {squeeze:.1f}%  최근고점 +{spike:.1f}%  이번봉 {chg:+.1f}%")
                                 sent[bkey] = ts
 
                 for kind, line in found:
