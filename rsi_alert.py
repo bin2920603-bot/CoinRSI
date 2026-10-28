@@ -11,6 +11,8 @@ RSI_MAX = 40           # 반등 후 RSI6이 이 값 이하일 때만 알림 (너
 LIVE_RSI_MIN_CHG = 0.5 # 진행중 RSI 알림은 이번 봉이 이 % 이상 올랐을 때만 (약한 신호 제외)
 EMA_MAX_PCT = 1.0      # EMA 위로 이 % 이내일 때만 알림 (너무 오른 건 제외)
 EMA_SLOPE_BARS = 3     # EMA 돌파: EMA 선이 이 봉 수 전보다 낮으면(내려가는 중이면) 제외
+TREND_SLOPE = 3        # 추세: EMA50이 이 봉 수 전보다 높아야 상승으로 인정
+DD_BARS = 100          # 고점 대비 낙폭: 최근 몇 봉의 고점을 볼지
 VOL_MIN_ELAPSED = 0.1  # 진행중 봉 거래량 비교: 봉이 이 비율 이상 지났을 때만 계산
 VOL_AVG_BARS = 20      # 거래량 평균을 낼 봉 개수 (평균 대비 ×배)
 BASE_LOOKBACK = 48     # 바닥 횡보 돌파: 저점을 볼 봉 개수
@@ -28,6 +30,7 @@ BAR_MS = {"1H": 3600000, "2H": 7200000, "4H": 14400000,
 STATE = "state/sent.json"
 LOGFILE = "state/log.json"
 HOURS = (1, 4, 24)
+TREND_LABEL = {"up": "📈상승", "down": "📉하락", "mix": "↔혼조"}
 
 
 def get(path, params=None):
@@ -65,24 +68,88 @@ def ema(values, n):
 
 
 def trend_code(closes):
-    """추세: up / down / mix. 봉이 모자라면 None"""
+    """추세: up / down / mix. 봉이 모자라면 None.
+    up   = EMA50이 EMA200 위 + 가격이 EMA50 위 + EMA50이 오르는 중
+    down = EMA50이 EMA200 아래 + 가격이 EMA200 아래
+    mix  = 그 외"""
     try:
         e50 = ema(closes, 50)
         e200 = ema(closes, 200)
-        if not e50 or not e200:
+        if not e50 or not e200 or len(e50) <= TREND_SLOPE:
             return None
         p, a, b = closes[-1], e50[-1], e200[-1]
-        if a > b and p > b:
-            return "up"
         if a < b and p < b:
             return "down"
+        if a > b and p > b and p > a and a >= e50[-1 - TREND_SLOPE]:
+            return "up"
         return "mix"
     except Exception:
         return None
 
 
 def trend_text(tr):
-    return {"up": "  📈상승", "down": "  📉하락", "mix": "  ↔혼조"}.get(tr, "  추세 -")
+    return "  " + TREND_LABEL[tr] if tr in TREND_LABEL else "  추세 -"
+
+
+def ctx_info(cs, closes):
+    """(위 저항 %, 저항 이름, 고점 대비 낙폭 %).
+    저항 이름: 선 이름 / "없음"(가격 위에 선이 없음) / ""(계산 불가)"""
+    try:
+        p = closes[-1]
+        lines = {}
+        for n in (20, 50, 200):
+            e = ema(closes, n)
+            if e:
+                lines[f"EMA{n}"] = e[-1]
+        if len(cs) >= 100:
+            v = [float(x[7]) for x in cs[-100:]]
+            c = closes[-100:]
+            sv = sum(v)
+            if sv > 0:
+                lines["VWMA100"] = sum(a * b for a, b in zip(c, v)) / sv
+        above = {k: x for k, x in lines.items() if x > p}
+        if not lines:
+            rs, name = None, ""
+        elif above:
+            name = min(above, key=above.get)
+            rs = (above[name] / p - 1) * 100
+        else:
+            rs, name = None, "없음"
+        hi = max(float(x[2]) for x in cs[-DD_BARS:])
+        dd = (p / hi - 1) * 100 if hi > 0 else None
+        return rs, name, dd
+    except Exception:
+        return None, "", None
+
+
+def ctx_text(rs, name, dd):
+    parts = []
+    if rs is not None:
+        parts.append(f"위 저항 +{rs:.1f}%({name})")
+    elif name == "없음":
+        parts.append("위 저항 없음")
+    if dd is not None:
+        parts.append(f"고점 대비 {dd:.0f}%")
+    return "  " + "  ".join(parts) if parts else ""
+
+
+def btc_line():
+    """알림 맨 위에 붙일 비트코인 방향 한 줄."""
+    try:
+        parts = []
+        chg = None
+        for bar, label in (("1H", "1시간"), ("4H", "4시간")):
+            c = get("/api/v5/market/candles",
+                    {"instId": "BTC-USDT-SWAP", "bar": bar, "limit": "300"})
+            closes = [float(x[4]) for x in c[::-1]]
+            parts.append(f"{label} {TREND_LABEL.get(trend_code(closes), '-')}")
+            if bar == "1H" and len(closes) > 25:
+                chg = (closes[-1] / closes[-25] - 1) * 100
+        if chg is not None:
+            parts.append(f"24시간 {chg:+.1f}%")
+        return "BTC " + " · ".join(parts)
+    except Exception:
+        return ""
 
 
 def vol_info(cs, mode, bar, now):
@@ -185,6 +252,14 @@ def make_report(log, now):
         ("×0.5~1", [e for e in rows if isnum(e.get("vx")) and 0.5 <= e["vx"] < 1]),
         ("×1~2", [e for e in rows if isnum(e.get("vx")) and 1 <= e["vx"] < 2]),
         ("×2 이상", [e for e in rows if isnum(e.get("vx")) and e["vx"] >= 2])])
+    section("■ 위 저항까지 거리", [
+        ("2% 이내", [e for e in rows if isnum(e.get("rs")) and e["rs"] < 2]),
+        ("2~5%", [e for e in rows if isnum(e.get("rs")) and 2 <= e["rs"] < 5]),
+        ("5% 이상", [e for e in rows if isnum(e.get("rs")) and e["rs"] >= 5])])
+    section("■ 고점 대비 낙폭", [
+        ("-20% 이내", [e for e in rows if isnum(e.get("dd")) and e["dd"] > -20]),
+        ("-20~-50%", [e for e in rows if isnum(e.get("dd")) and -50 < e["dd"] <= -20]),
+        ("-50% 넘게 하락", [e for e in rows if isnum(e.get("dd")) and e["dd"] <= -50])])
     section("■ 진행중 / 마감확정", [("진행중", [e for e in rows if e["m"] == "live"]),
                                     ("마감확정", [e for e in rows if e["m"] == "close"])])
     lines.append("건수가 적은 칸은 우연일 수 있어요. 며칠 더 쌓이면 믿을 만해져요.")
@@ -213,11 +288,14 @@ def main():
 
     update_log(log, prices, now)
 
-    def add_log(inst, bar, kind, mode, price, vp, vx, tr):
+    def add_log(inst, bar, kind, mode, price, vp, vx, tr, rs, dd):
         log.append({"t": now, "i": inst, "b": bar, "k": kind, "m": mode, "p": price,
                     "vp": None if vp is None else round(vp, 1),
                     "vx": None if vx is None else round(vx, 2),
-                    "tr": tr, "r1": None, "r4": None, "r24": None})
+                    "tr": tr,
+                    "rs": None if rs is None else round(rs, 2),
+                    "dd": None if dd is None else round(dd, 1),
+                    "r1": None, "r4": None, "r24": None})
 
     hits = {label: [] for _, label in BARS}
     bases = []
@@ -252,7 +330,8 @@ def main():
                 chg = (closes[-1] / float(cs[-1][1]) - 1) * 100 if float(cs[-1][1]) else 0
                 vp, vx = vol_info(cs, mode, bar, now)
                 tr = trend_code(closes)
-                vt = vol_text(vp, vx) + trend_text(tr)
+                rs, rname, dd = ctx_info(cs, closes)
+                vt = vol_text(vp, vx) + trend_text(tr) + ctx_text(rs, rname, dd)
 
                 found = []
                 r = rsi(closes, RSI_SIGNAL)
@@ -290,7 +369,7 @@ def main():
                                 btag = "진행중" if mode == "live" else "마감확정"
                                 bases.append(f"[{label}·{btag}] {name}  저점 대비 +{rise:.1f}%  EMA뭉침 {squeeze:.1f}%  최근고점 +{spike:.1f}%  이번봉 {chg:+.1f}%{vt}")
                                 sent[bkey] = ts
-                                add_log(inst, bar, "base", mode, closes[-1], vp, vx, tr)
+                                add_log(inst, bar, "base", mode, closes[-1], vp, vx, tr, rs, dd)
 
                 for kind, line in found:
                     key = f"{inst}|{bar}|{kind}" + ("|live" if mode == "live" else "")
@@ -299,12 +378,15 @@ def main():
                         tag = f"{what}·진행중" if mode == "live" else f"{what}·마감확정"
                         hits[label].append(f"[{tag}] {line}")
                         sent[key] = ts
-                        add_log(inst, bar, kind, mode, closes[-1], vp, vx, tr)
+                        add_log(inst, bar, kind, mode, closes[-1], vp, vx, tr, rs, dd)
 
     parts = [f"━ {label} ━\n" + "\n".join(v) for label, v in hits.items() if v]
     if bases:
         parts.insert(0, "🎯 바닥 횡보 돌파 🎯\n" + "\n".join(bases))
     if parts:
+        btc = btc_line()
+        if btc:
+            parts.insert(0, btc)
         telegram(token, chat, "\n\n".join(parts))
     elif first:
         telegram(token, chat, "✅ RSI 알림이 켜졌어요. 조건에 맞는 코인이 나오면 알려 드려요.")
