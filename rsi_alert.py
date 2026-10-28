@@ -11,6 +11,7 @@ RSI_MAX = 40           # 반등 후 RSI6이 이 값 이하일 때만 알림 (너
 LIVE_RSI_MIN_CHG = 0.5 # 진행중 RSI 알림은 이번 봉이 이 % 이상 올랐을 때만 (약한 신호 제외)
 EMA_MAX_PCT = 1.0      # EMA 위로 이 % 이내일 때만 알림 (너무 오른 건 제외)
 EMA_SLOPE_BARS = 3     # EMA 돌파: EMA 선이 이 봉 수 전보다 낮으면(내려가는 중이면) 제외
+VOL_MIN_ELAPSED = 0.1  # 진행중 봉 거래량 비교: 봉이 이 비율 이상 지났을 때만 계산
 BASE_LOOKBACK = 48     # 바닥 횡보 돌파: 저점을 볼 봉 개수
 BASE_RISE_PCT = 10     # 바닥 횡보 돌파: 저점 대비 이 % 이내일 때만
 BASE_SPIKE_BARS = 24   # 바닥 횡보 돌파: 최근 몇 봉 안에 급등 이력이 있는지 볼 개수
@@ -19,6 +20,8 @@ SQUEEZE_PCT = 3        # 바닥 횡보 돌파: 직전 10봉 EMA7·20·50이 평�
 WINDOW_MIN = 45        # 마감된 지 몇 분 이내의 봉만 알릴지
 BARS = [("1H", "1시간봉"), ("2H", "2시간봉"), ("4H", "4시간봉"),
         ("1D", "일봉"), ("1W", "주봉"), ("1M", "월봉")]
+BAR_MS = {"1H": 3600000, "2H": 7200000, "4H": 14400000,
+          "1D": 86400000, "1W": 604800000, "1M": 2592000000}
 STATE = "state/sent.json"
 
 
@@ -54,6 +57,24 @@ def ema(values, n):
         e = v * k + e * (1 - k)
         out.append(e)
     return out
+
+
+def vol_text(cs, mode, bar, now):
+    """직전 봉 대비 거래량 변화(%). 진행중 봉은 지금까지 쌓인 속도를 봉 전체 길이로 환산."""
+    try:
+        cur = float(cs[-1][7])
+        prev = float(cs[-2][7])
+        if prev <= 0:
+            return "  거래량 -"
+        if mode == "live":
+            dur = BAR_MS[bar]
+            elapsed = now - int(cs[-1][0])
+            if elapsed < dur * VOL_MIN_ELAPSED:
+                return "  거래량 -"
+            cur = cur * dur / min(elapsed, dur)
+        return f"  거래량 {(cur / prev - 1) * 100:+.0f}%"
+    except Exception:
+        return "  거래량 -"
 
 
 def telegram(token, chat, text):
@@ -120,6 +141,7 @@ def main():
                 ts = cs[-1][0]
                 closes = [float(x[4]) for x in cs]
                 chg = (closes[-1] / float(cs[-1][1]) - 1) * 100 if float(cs[-1][1]) else 0
+                vt = vol_text(cs, mode, bar, now)
 
                 found = []
                 r = rsi(closes, RSI_SIGNAL)
@@ -128,7 +150,7 @@ def main():
                     for n in RSI_SHOW:
                         rr = rsi(closes, n)
                         shown.append(f"{rr[-1]:.0f}" if rr else "-")
-                    found.append(("rsi", f"{name}  RSI{RSI_SIGNAL} {r[-2]:.1f}→{r[-1]:.1f}  (RSI {'/'.join(shown)})  이번봉 {chg:+.1f}%"))
+                    found.append(("rsi", f"{name}  RSI{RSI_SIGNAL} {r[-2]:.1f}→{r[-1]:.1f}  (RSI {'/'.join(shown)})  이번봉 {chg:+.1f}%{vt}"))
                 for n in ((7,) + EMAS if bar in LONG_BARS else EMAS):
                     e = ema(closes, n)
                     if len(e) > EMA_SLOPE_BARS and closes[-2] <= e[-2] and closes[-1] > e[-1]:
@@ -136,7 +158,7 @@ def main():
                             continue  # EMA 선이 내려가는 중이면 제외
                         above = (closes[-1] / e[-1] - 1) * 100
                         if above <= EMA_MAX_PCT:
-                            found.append((f"ema{n}", f"{name}  EMA{n} 위 +{above:.1f}%  이번봉 {chg:+.1f}%"))
+                            found.append((f"ema{n}", f"{name}  EMA{n} 위 +{above:.1f}%  이번봉 {chg:+.1f}%{vt}"))
 
                 # 🎯 바닥 횡보 돌파: 저점 근처 + EMA 뭉침 + EMA20 위로 첫 돌파
                 if len(cs) >= 60:
@@ -155,7 +177,7 @@ def main():
                             bkey = f"{inst}|{bar}|base" + ("|live" if mode == "live" else "")
                             if sent.get(bkey) != ts:
                                 btag = "진행중" if mode == "live" else "마감확정"
-                                bases.append(f"[{label}·{btag}] {name}  저점 대비 +{rise:.1f}%  EMA뭉침 {squeeze:.1f}%  최근고점 +{spike:.1f}%  이번봉 {chg:+.1f}%")
+                                bases.append(f"[{label}·{btag}] {name}  저점 대비 +{rise:.1f}%  EMA뭉침 {squeeze:.1f}%  최근고점 +{spike:.1f}%  이번봉 {chg:+.1f}%{vt}")
                                 sent[bkey] = ts
 
                 for kind, line in found:
