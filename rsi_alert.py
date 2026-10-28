@@ -8,6 +8,7 @@ RSI_SHOW = (6, 12, 24) # 알림에 같이 보여 줄 RSI
 EMAS = (20, 50)        # 가격이 위로 뚫는지 볼 EMA
 LONG_BARS = ("1D", "1W", "1M")  # 이 봉에서는 EMA7도 봄
 RSI_MAX = 40           # 반등 후 RSI6이 이 값 이하일 때만 알림 (너무 오른 건 제외)
+LIVE_RSI_MIN_CHG = 0.5 # 진행중 RSI 알림은 이번 봉이 이 % 이상 올랐을 때만 (약한 신호 제외)
 EMA_MAX_PCT = 1.0      # EMA 위로 이 % 이내일 때만 알림 (너무 오른 건 제외)
 BASE_LOOKBACK = 48     # 바닥 횡보 돌파: 저점을 볼 봉 개수
 BASE_RISE_PCT = 10     # 바닥 횡보 돌파: 저점 대비 이 % 이내일 때만
@@ -121,7 +122,7 @@ def main():
 
                 found = []
                 r = rsi(closes, RSI_SIGNAL)
-                if len(r) >= 2 and r[-2] <= LOW < r[-1] <= RSI_MAX:
+                if len(r) >= 2 and r[-2] <= LOW < r[-1] <= RSI_MAX and (mode == "close" or chg >= LIVE_RSI_MIN_CHG):
                     shown = []
                     for n in RSI_SHOW:
                         rr = rsi(closes, n)
