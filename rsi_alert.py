@@ -169,7 +169,7 @@ def btc_line():
                 chg = (closes[-1] / closes[-25] - 1) * 100
         if chg is not None:
             parts.append(f"24시간 {chg:+.1f}%")
-        return "BTC " + " · ".join(parts)
+        return "<b>BTC</b> " + " · ".join(parts)
     except Exception:
         return ""
 
@@ -205,6 +205,7 @@ def vol_text(pct, x):
 
 
 def telegram(token, chat, text):
+    """길면 나눠서 보낸다. <b>굵게</b> 로 보내고, 실패하면 굵게 없이 다시 보낸다."""
     chunks, cur = [], ""
     for line in text.split("\n"):
         if len(cur) + len(line) + 1 > 3800:
@@ -212,12 +213,20 @@ def telegram(token, chat, text):
             cur = ""
         cur += line + "\n"
     chunks.append(cur)
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
     for part in chunks:
-        requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            data={"chat_id": chat, "text": part.strip()},
-            timeout=15,
-        )
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            r = requests.post(url, data={"chat_id": chat, "text": part,
+                                         "parse_mode": "HTML"}, timeout=15)
+            if r.status_code == 200:
+                continue
+        except Exception:
+            pass
+        plain = part.replace("<b>", "").replace("</b>", "")
+        requests.post(url, data={"chat_id": chat, "text": plain}, timeout=15)
 
 
 def isnum(v):
@@ -368,7 +377,7 @@ def main():
                         rr = rsi(closes, n)
                         shown.append(f"{rr[-1]:.0f}" if rr else "-")
                     st, sl = stop_info(cs, closes[-1])
-                    found.append(("rsi", f"{name}  RSI{RSI_SIGNAL} {r[-2]:.1f}→{r[-1]:.1f}  (RSI {'/'.join(shown)})  이번봉 {chg:+.1f}%{vt}{st}", sl))
+                    found.append(("rsi", f"<b>{name}</b>  RSI{RSI_SIGNAL} {r[-2]:.1f}→{r[-1]:.1f}  (RSI {'/'.join(shown)})  이번봉 {chg:+.1f}%{vt}{st}", sl))
                 for n in ((7,) + EMAS if bar in LONG_BARS else EMAS):
                     e = ema(closes, n)
                     if len(e) > EMA_SLOPE_BARS and closes[-2] <= e[-2] and closes[-1] > e[-1]:
@@ -377,7 +386,7 @@ def main():
                         above = (closes[-1] / e[-1] - 1) * 100
                         if above <= EMA_MAX_PCT:
                             st, sl = stop_info(cs, closes[-1], e[-1] * 0.998)
-                            found.append((f"ema{n}", f"{name}  EMA{n} 위 +{above:.1f}%  이번봉 {chg:+.1f}%{vt}{st}", sl))
+                            found.append((f"ema{n}", f"<b>{name}</b>  EMA{n} 위 +{above:.1f}%  이번봉 {chg:+.1f}%{vt}{st}", sl))
 
                 # 🎯 바닥 횡보 돌파: 저점 근처 + EMA 뭉침 + EMA20 위로 첫 돌파
                 if len(cs) >= 60:
@@ -397,7 +406,7 @@ def main():
                             if sent.get(bkey) != ts:
                                 btag = "진행중" if mode == "live" else "마감확정"
                                 st, sl = stop_info(cs, closes[-1], e20[-1] * 0.998)
-                                bases.append(f"[{label}·{btag}] {name}  저점 대비 +{rise:.1f}%  EMA뭉침 {squeeze:.1f}%  최근고점 +{spike:.1f}%  이번봉 {chg:+.1f}%{vt}{st}")
+                                bases.append(f"[{label}·{btag}] <b>{name}</b>  저점 대비 +{rise:.1f}%  EMA뭉침 {squeeze:.1f}%  최근고점 +{spike:.1f}%  이번봉 {chg:+.1f}%{vt}{st}")
                                 sent[bkey] = ts
                                 add_log(inst, bar, "base", mode, closes[-1], vp, vx, tr, rs, dd, sl)
 
@@ -410,14 +419,15 @@ def main():
                         sent[key] = ts
                         add_log(inst, bar, kind, mode, closes[-1], vp, vx, tr, rs, dd, sl)
 
-    parts = [f"━ {label} ━\n" + "\n".join(v) for label, v in hits.items() if v]
+    # 종목마다 한 줄씩 띄워서 보낸다
+    parts = [f"━ {label} ━\n\n" + "\n\n".join(v) for label, v in hits.items() if v]
     if bases:
-        parts.insert(0, "🎯 바닥 횡보 돌파 🎯\n" + "\n".join(bases))
+        parts.insert(0, "🎯 바닥 횡보 돌파 🎯\n\n" + "\n\n".join(bases))
     if parts:
         btc = btc_line()
         if btc:
             parts.insert(0, btc)
-        telegram(token, chat, "\n\n".join(parts))
+        telegram(token, chat, "\n\n\n".join(parts))
     elif first:
         telegram(token, chat, "✅ RSI 알림이 켜졌어요. 조건에 맞는 코인이 나오면 알려 드려요.")
 
