@@ -132,7 +132,7 @@ def ctx_text(rs, name, dd):
         parts.append("위 저항 없음")
     if dd is not None:
         parts.append(f"고점 대비 {dd:.0f}%")
-    return "  " + "  ".join(parts) if parts else ""
+    return "  ".join(parts)
 
 
 def stop_info(cs, price, ref=None):
@@ -144,15 +144,21 @@ def stop_info(cs, price, ref=None):
             cands.append(ref)
         below = [c for c in cands if c < price]
         if not below:
-            return "  접는 선 -", None
+            return "접는 선 -", None
         s = max(below)
         pct = (s / price - 1) * 100
-        t = f"  접는 선 {s:.6g}({pct:.1f}%)"
+        t = f"접는 선 {s:.6g}({pct:.1f}%)"
         if pct <= -STOP_BIG_PCT:
             t += " 손절폭 큼"
         return t, pct
     except Exception:
-        return "  접는 선 -", None
+        return "접는 선 -", None
+
+
+def block(name, mid, vl, cl, st):
+    """알림 한 개를 여러 줄로: 티커 / 핵심 / 거래량·추세 / 저항·낙폭 / 접는 선"""
+    lines = [f"<b>▶ {name}</b>", mid.strip(), vl.strip(), cl.strip(), st.strip()]
+    return "\n".join(l for l in lines if l)
 
 
 def btc_line():
@@ -201,7 +207,7 @@ def vol_text(pct, x):
         parts.append(f"{'🔴' if pct >= 0 else '🔵'}직전 {pct:+.0f}%")
     if x is not None:
         parts.append(f"평균 ×{x:.1f}")
-    return "  " + " · ".join(parts) if parts else "  거래량 -"
+    return " · ".join(parts) if parts else "거래량 -"
 
 
 def telegram(token, chat, text):
@@ -367,7 +373,8 @@ def main():
                 vp, vx = vol_info(cs, mode, bar, now)
                 tr = trend_code(closes)
                 rs, rname, dd = ctx_info(cs, closes)
-                vt = vol_text(vp, vx) + trend_text(tr) + ctx_text(rs, rname, dd)
+                vl = vol_text(vp, vx) + trend_text(tr)   # 거래량 + 추세
+                cl = ctx_text(rs, rname, dd)             # 위 저항 + 고점 대비
 
                 found = []   # (종류, 문구, 접는 선 거리%)
                 r = rsi(closes, RSI_SIGNAL)
@@ -377,7 +384,8 @@ def main():
                         rr = rsi(closes, n)
                         shown.append(f"{rr[-1]:.0f}" if rr else "-")
                     st, sl = stop_info(cs, closes[-1])
-                    found.append(("rsi", f"<b>{name}</b>  RSI{RSI_SIGNAL} {r[-2]:.1f}→{r[-1]:.1f}  (RSI {'/'.join(shown)})  이번봉 {chg:+.1f}%{vt}{st}", sl))
+                    mid = f"RSI{RSI_SIGNAL} {r[-2]:.1f}→{r[-1]:.1f}  (RSI {'/'.join(shown)})  이번봉 {chg:+.1f}%"
+                    found.append(("rsi", block(name, mid, vl, cl, st), sl))
                 for n in ((7,) + EMAS if bar in LONG_BARS else EMAS):
                     e = ema(closes, n)
                     if len(e) > EMA_SLOPE_BARS and closes[-2] <= e[-2] and closes[-1] > e[-1]:
@@ -386,7 +394,8 @@ def main():
                         above = (closes[-1] / e[-1] - 1) * 100
                         if above <= EMA_MAX_PCT:
                             st, sl = stop_info(cs, closes[-1], e[-1] * 0.998)
-                            found.append((f"ema{n}", f"<b>{name}</b>  EMA{n} 위 +{above:.1f}%  이번봉 {chg:+.1f}%{vt}{st}", sl))
+                            mid = f"EMA{n} 위 +{above:.1f}%  이번봉 {chg:+.1f}%"
+                            found.append((f"ema{n}", block(name, mid, vl, cl, st), sl))
 
                 # 🎯 바닥 횡보 돌파: 저점 근처 + EMA 뭉침 + EMA20 위로 첫 돌파
                 if len(cs) >= 60:
@@ -406,16 +415,18 @@ def main():
                             if sent.get(bkey) != ts:
                                 btag = "진행중" if mode == "live" else "마감확정"
                                 st, sl = stop_info(cs, closes[-1], e20[-1] * 0.998)
-                                bases.append(f"[{label}·{btag}] <b>{name}</b>  저점 대비 +{rise:.1f}%  EMA뭉침 {squeeze:.1f}%  최근고점 +{spike:.1f}%  이번봉 {chg:+.1f}%{vt}{st}")
+                                mid = (f"저점 대비 +{rise:.1f}%  EMA뭉침 {squeeze:.1f}%\n"
+                                       f"최근고점 +{spike:.1f}%  이번봉 {chg:+.1f}%")
+                                bases.append(f"[{label}·{btag}]\n" + block(name, mid, vl, cl, st))
                                 sent[bkey] = ts
                                 add_log(inst, bar, "base", mode, closes[-1], vp, vx, tr, rs, dd, sl)
 
-                for kind, line, sl in found:
+                for kind, text, sl in found:
                     key = f"{inst}|{bar}|{kind}" + ("|live" if mode == "live" else "")
                     if sent.get(key) != ts:
                         what = "RSI 반등" if kind == "rsi" else f"{kind.upper()} 돌파"
                         tag = f"{what}·진행중" if mode == "live" else f"{what}·마감확정"
-                        hits[label].append(f"[{tag}] {line}")
+                        hits[label].append(f"[{tag}]\n{text}")
                         sent[key] = ts
                         add_log(inst, bar, kind, mode, closes[-1], vp, vx, tr, rs, dd, sl)
 
