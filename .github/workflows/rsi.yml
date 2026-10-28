@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 concurrency:
   group: rsi
@@ -34,3 +35,11 @@ jobs:
           git commit -m "state: $(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M KST')"
           git pull --rebase --autostash
           git push
+      - name: 다음 실행 예약
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          sleep 330
+          gh workflow run rsi.yml --ref main
