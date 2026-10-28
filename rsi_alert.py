@@ -3,6 +3,8 @@ import os, json, time, requests
 OKX = "https://www.okx.com"
 TOP_N = 100   # 거래대금 상위 몇 개를 볼지
 LOW = 30      # RSI 바닥 기준
+BARS = [("1H", "1시간봉"), ("2H", "2시간봉"), ("4H", "4시간봉"),
+        ("1D", "일봉"), ("1W", "주봉"), ("1M", "월봉")]
 STATE = "state/sent.json"
 
 
@@ -52,28 +54,31 @@ def main():
             pass
     rows.sort(reverse=True)
 
-    hits = []
+    hits = {label: [] for _, label in BARS}
     for vol, inst in rows[:TOP_N]:
-        time.sleep(0.15)
-        try:
-            c = get("/api/v5/market/candles",
-                    {"instId": inst, "bar": "1H", "limit": "100"})
-        except Exception:
-            continue
-        c = [x for x in c if x[8] == "1"][::-1]  # 마감된 봉만, 오래된 순
-        if len(c) < 20:
-            continue
-        r = rsi([float(x[4]) for x in c])
-        if len(r) < 2:
-            continue
-        ts = c[-1][0]
-        if r[-2] <= LOW < r[-1] and sent.get(inst) != ts:
-            name = inst.replace("-USDT-SWAP", "")
-            hits.append(f"{name}  RSI {r[-2]:.1f} → {r[-1]:.1f}")
-            sent[inst] = ts
+        for bar, label in BARS:
+            time.sleep(0.15)
+            try:
+                c = get("/api/v5/market/candles",
+                        {"instId": inst, "bar": bar, "limit": "100"})
+            except Exception:
+                continue
+            c = [x for x in c if x[8] == "1"][::-1]  # 마감된 봉만, 오래된 순
+            if len(c) < 20:
+                continue
+            r = rsi([float(x[4]) for x in c])
+            if len(r) < 2:
+                continue
+            ts = c[-1][0]
+            key = f"{inst}|{bar}"
+            if r[-2] <= LOW < r[-1] and sent.get(key) != ts:
+                name = inst.replace("-USDT-SWAP", "")
+                hits[label].append(f"{name}  RSI {r[-2]:.1f} → {r[-1]:.1f}")
+                sent[key] = ts
 
-    if hits:
-        telegram(token, chat, "📈 1시간봉 RSI 바닥 반등\n" + "\n".join(hits))
+    parts = [f"[{label}]\n" + "\n".join(v) for label, v in hits.items() if v]
+    if parts:
+        telegram(token, chat, "📈 RSI 바닥 반등\n\n" + "\n\n".join(parts))
     elif first:
         telegram(token, chat, "✅ RSI 알림이 켜졌어요. 조건에 맞는 코인이 나오면 알려 드려요.")
 
