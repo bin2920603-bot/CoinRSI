@@ -60,6 +60,23 @@ def ema(values, n):
     return out
 
 
+def trend_text(closes):
+    """추세: EMA50·EMA200·가격 위치로 판단. 📈상승 / 📉하락 / ↔혼조. 봉이 모자라면 추세 -"""
+    try:
+        e50 = ema(closes, 50)
+        e200 = ema(closes, 200)
+        if not e50 or not e200:
+            return "  추세 -"
+        p, a, b = closes[-1], e50[-1], e200[-1]
+        if a > b and p > b:
+            return "  📈상승"
+        if a < b and p < b:
+            return "  📉하락"
+        return "  ↔혼조"
+    except Exception:
+        return "  추세 -"
+
+
 def vol_text(cs, mode, bar, now):
     """거래량: 직전 봉 대비 %(늘면 🔴, 줄면 🔵) + 최근 20봉 평균 대비 ×배.
     진행중 봉은 지금까지 쌓인 속도를 봉 전체 길이로 환산."""
@@ -152,7 +169,7 @@ def main():
                 ts = cs[-1][0]
                 closes = [float(x[4]) for x in cs]
                 chg = (closes[-1] / float(cs[-1][1]) - 1) * 100 if float(cs[-1][1]) else 0
-                vt = vol_text(cs, mode, bar, now)
+                vt = vol_text(cs, mode, bar, now) + trend_text(closes)
 
                 found = []
                 r = rsi(closes, RSI_SIGNAL)
