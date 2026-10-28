@@ -19,11 +19,15 @@ BASE_SPIKE_BARS = 24   # 바닥 횡보 돌파: 최근 몇 봉 안에 급등 이�
 BASE_SPIKE_PCT = 6     # 바닥 횡보 돌파: 최근 고점이 현재가보다 이 % 넘게 높았으면 제외 (이미 급등했다가 내려온 자리)
 SQUEEZE_PCT = 3        # 바닥 횡보 돌파: 직전 10봉 EMA7·20·50이 평균 이 % 이내로 뭉쳐 있을 때만
 WINDOW_MIN = 45        # 마감된 지 몇 분 이내의 봉만 알릴지
+LOG_DAYS = 7           # 알림 기록을 며칠 보관할지
+REPORT_HOUR = 9        # 매일 몇 시(한국시간)에 성적표를 보낼지
 BARS = [("1H", "1시간봉"), ("2H", "2시간봉"), ("4H", "4시간봉"),
         ("1D", "일봉"), ("1W", "주봉"), ("1M", "월봉")]
 BAR_MS = {"1H": 3600000, "2H": 7200000, "4H": 14400000,
           "1D": 86400000, "1W": 604800000, "1M": 2592000000}
 STATE = "state/sent.json"
+LOGFILE = "state/log.json"
+HOURS = (1, 4, 24)
 
 
 def get(path, params=None):
@@ -60,25 +64,29 @@ def ema(values, n):
     return out
 
 
-def trend_text(closes):
-    """추세: EMA50·EMA200·가격 위치로 판단. 📈상승 / 📉하락 / ↔혼조. 봉이 모자라면 추세 -"""
+def trend_code(closes):
+    """추세: up / down / mix. 봉이 모자라면 None"""
     try:
         e50 = ema(closes, 50)
         e200 = ema(closes, 200)
         if not e50 or not e200:
-            return "  추세 -"
+            return None
         p, a, b = closes[-1], e50[-1], e200[-1]
         if a > b and p > b:
-            return "  📈상승"
+            return "up"
         if a < b and p < b:
-            return "  📉하락"
-        return "  ↔혼조"
+            return "down"
+        return "mix"
     except Exception:
-        return "  추세 -"
+        return None
 
 
-def vol_text(cs, mode, bar, now):
-    """거래량: 직전 봉 대비 %(늘면 🔴, 줄면 🔵) + 최근 20봉 평균 대비 ×배.
+def trend_text(tr):
+    return {"up": "  📈상승", "down": "  📉하락", "mix": "  ↔혼조"}.get(tr, "  추세 -")
+
+
+def vol_info(cs, mode, bar, now):
+    """(직전 봉 대비 %, 최근 20봉 평균 대비 ×배). 계산 못 하면 None.
     진행중 봉은 지금까지 쌓인 속도를 봉 전체 길이로 환산."""
     try:
         cur = float(cs[-1][7])
@@ -87,22 +95,24 @@ def vol_text(cs, mode, bar, now):
             dur = BAR_MS[bar]
             elapsed = now - int(cs[-1][0])
             if elapsed < dur * VOL_MIN_ELAPSED:
-                return "  거래량 -"
+                return None, None
             cur = cur * dur / min(elapsed, dur)
         past = [float(x[7]) for x in cs[-1 - VOL_AVG_BARS:-1]]
         avg = sum(past) / len(past) if past else 0
-        parts = []
-        if prev > 0:
-            pct = (cur / prev - 1) * 100
-            icon = "🔴" if pct >= 0 else "🔵"
-            parts.append(f"{icon}직전 {pct:+.0f}%")
-        if avg > 0:
-            parts.append(f"평균 ×{cur / avg:.1f}")
-        if not parts:
-            return "  거래량 -"
-        return "  " + " · ".join(parts)
+        pct = (cur / prev - 1) * 100 if prev > 0 else None
+        x = cur / avg if avg > 0 else None
+        return pct, x
     except Exception:
-        return "  거래량 -"
+        return None, None
+
+
+def vol_text(pct, x):
+    parts = []
+    if pct is not None:
+        parts.append(f"{'🔴' if pct >= 0 else '🔵'}직전 {pct:+.0f}%")
+    if x is not None:
+        parts.append(f"평균 ×{x:.1f}")
+    return "  " + " · ".join(parts) if parts else "  거래량 -"
 
 
 def telegram(token, chat, text):
@@ -121,22 +131,93 @@ def telegram(token, chat, text):
         )
 
 
+def isnum(v):
+    return isinstance(v, (int, float))
+
+
+def update_log(log, prices, now):
+    """기록된 알림의 1·4·24시간 뒤 가격 변화를 채운다 (너무 늦으면 놓친 것으로 표시)."""
+    for e in log:
+        age = now - e["t"]
+        p = prices.get(e["i"])
+        for h in HOURS:
+            key = f"r{h}"
+            if e.get(key) is not None:
+                continue
+            if age < h * 3600000:
+                continue
+            if age > (h + 3) * 3600000 or not p or not e["p"]:
+                e[key] = "x"
+            else:
+                e[key] = round((p / e["p"] - 1) * 100, 2)
+
+
+def stat(items):
+    n = len(items)
+    up = sum(1 for e in items if e["r4"] > 0)
+    avg = sum(e["r4"] for e in items) / n
+    return f"{n}건 · 4시간 뒤 상승 {up * 100 // n}% · 평균 {avg:+.1f}%"
+
+
+def make_report(log, now):
+    rows = [e for e in log if isnum(e.get("r4")) and now - e["t"] <= LOG_DAYS * 86400000]
+    if len(rows) < 5:
+        return None
+    lines = [f"📊 알림 성적표 (최근 {LOG_DAYS}일, 알림 가격 → 4시간 뒤 가격)", f"전체: {stat(rows)}", ""]
+
+    def section(title, groups):
+        out = []
+        for name, items in groups:
+            if items:
+                out.append(f"  {name}: {stat(items)}")
+        if out:
+            lines.append(title)
+            lines.extend(out)
+            lines.append("")
+
+    kn = {"rsi": "RSI 반등", "ema20": "EMA20 돌파", "ema50": "EMA50 돌파", "ema7": "EMA7 돌파", "base": "🎯바닥횡보"}
+    section("■ 알림 종류", [(kn[k], [e for e in rows if e["k"] == k]) for k in kn])
+    section("■ 추세", [("📈상승", [e for e in rows if e.get("tr") == "up"]),
+                      ("📉하락", [e for e in rows if e.get("tr") == "down"]),
+                      ("↔혼조", [e for e in rows if e.get("tr") == "mix"])])
+    section("■ 거래량 (평균 대비)", [
+        ("×0.5 미만", [e for e in rows if isnum(e.get("vx")) and e["vx"] < 0.5]),
+        ("×0.5~1", [e for e in rows if isnum(e.get("vx")) and 0.5 <= e["vx"] < 1]),
+        ("×1~2", [e for e in rows if isnum(e.get("vx")) and 1 <= e["vx"] < 2]),
+        ("×2 이상", [e for e in rows if isnum(e.get("vx")) and e["vx"] >= 2])])
+    section("■ 진행중 / 마감확정", [("진행중", [e for e in rows if e["m"] == "live"]),
+                                    ("마감확정", [e for e in rows if e["m"] == "close"])])
+    lines.append("건수가 적은 칸은 우연일 수 있어요. 며칠 더 쌓이면 믿을 만해져요.")
+    return "\n".join(lines)
+
+
 def main():
     token = os.environ["TELEGRAM_BOT_TOKEN"]
     chat = os.environ["TELEGRAM_CHAT_ID"]
     first = not os.path.exists(STATE)
     sent = {} if first else json.load(open(STATE))
+    log = json.load(open(LOGFILE)) if os.path.exists(LOGFILE) else []
     now = int(time.time() * 1000)
 
     rows = []
+    prices = {}
     for t in get("/api/v5/market/tickers", {"instType": "SWAP"}):
         if not t["instId"].endswith("-USDT-SWAP"):
             continue
         try:
+            prices[t["instId"]] = float(t["last"])
             rows.append((float(t["volCcy24h"]) * float(t["last"]), t["instId"]))
         except ValueError:
             pass
     rows.sort(reverse=True)
+
+    update_log(log, prices, now)
+
+    def add_log(inst, bar, kind, mode, price, vp, vx, tr):
+        log.append({"t": now, "i": inst, "b": bar, "k": kind, "m": mode, "p": price,
+                    "vp": None if vp is None else round(vp, 1),
+                    "vx": None if vx is None else round(vx, 2),
+                    "tr": tr, "r1": None, "r4": None, "r24": None})
 
     hits = {label: [] for _, label in BARS}
     bases = []
@@ -169,7 +250,9 @@ def main():
                 ts = cs[-1][0]
                 closes = [float(x[4]) for x in cs]
                 chg = (closes[-1] / float(cs[-1][1]) - 1) * 100 if float(cs[-1][1]) else 0
-                vt = vol_text(cs, mode, bar, now) + trend_text(closes)
+                vp, vx = vol_info(cs, mode, bar, now)
+                tr = trend_code(closes)
+                vt = vol_text(vp, vx) + trend_text(tr)
 
                 found = []
                 r = rsi(closes, RSI_SIGNAL)
@@ -207,6 +290,7 @@ def main():
                                 btag = "진행중" if mode == "live" else "마감확정"
                                 bases.append(f"[{label}·{btag}] {name}  저점 대비 +{rise:.1f}%  EMA뭉침 {squeeze:.1f}%  최근고점 +{spike:.1f}%  이번봉 {chg:+.1f}%{vt}")
                                 sent[bkey] = ts
+                                add_log(inst, bar, "base", mode, closes[-1], vp, vx, tr)
 
                 for kind, line in found:
                     key = f"{inst}|{bar}|{kind}" + ("|live" if mode == "live" else "")
@@ -215,6 +299,7 @@ def main():
                         tag = f"{what}·진행중" if mode == "live" else f"{what}·마감확정"
                         hits[label].append(f"[{tag}] {line}")
                         sent[key] = ts
+                        add_log(inst, bar, kind, mode, closes[-1], vp, vx, tr)
 
     parts = [f"━ {label} ━\n" + "\n".join(v) for label, v in hits.items() if v]
     if bases:
@@ -224,8 +309,19 @@ def main():
     elif first:
         telegram(token, chat, "✅ RSI 알림이 켜졌어요. 조건에 맞는 코인이 나오면 알려 드려요.")
 
+    # 매일 아침 성적표
+    kst = time.gmtime(now / 1000 + 9 * 3600)
+    today = time.strftime("%Y-%m-%d", kst)
+    if kst.tm_hour == REPORT_HOUR and sent.get("_report") != today:
+        text = make_report(log, now)
+        if text:
+            telegram(token, chat, text)
+            sent["_report"] = today
+
+    log = [e for e in log if now - e["t"] <= LOG_DAYS * 86400000]
     os.makedirs("state", exist_ok=True)
     json.dump(sent, open(STATE, "w"))
+    json.dump(log, open(LOGFILE, "w"))
 
 
 if __name__ == "__main__":
