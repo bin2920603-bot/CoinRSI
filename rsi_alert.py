@@ -10,6 +10,7 @@ LONG_BARS = ("1D", "1W", "1M")  # 이 봉에서는 EMA7도 봄
 RSI_MAX = 40           # 반등 후 RSI6이 이 값 이하일 때만 알림 (너무 오른 건 제외)
 LIVE_RSI_MIN_CHG = 0.5 # 진행중 RSI 알림은 이번 봉이 이 % 이상 올랐을 때만 (약한 신호 제외)
 EMA_MAX_PCT = 1.0      # EMA 위로 이 % 이내일 때만 알림 (너무 오른 건 제외)
+EMA_SLOPE_BARS = 3     # EMA 돌파: EMA 선이 이 봉 수 전보다 낮으면(내려가는 중이면) 제외
 BASE_LOOKBACK = 48     # 바닥 횡보 돌파: 저점을 볼 봉 개수
 BASE_RISE_PCT = 10     # 바닥 횡보 돌파: 저점 대비 이 % 이내일 때만
 BASE_SPIKE_BARS = 24   # 바닥 횡보 돌파: 최근 몇 봉 안에 급등 이력이 있는지 볼 개수
@@ -130,7 +131,9 @@ def main():
                     found.append(("rsi", f"{name}  RSI{RSI_SIGNAL} {r[-2]:.1f}→{r[-1]:.1f}  (RSI {'/'.join(shown)})  이번봉 {chg:+.1f}%"))
                 for n in ((7,) + EMAS if bar in LONG_BARS else EMAS):
                     e = ema(closes, n)
-                    if len(e) >= 2 and closes[-2] <= e[-2] and closes[-1] > e[-1]:
+                    if len(e) > EMA_SLOPE_BARS and closes[-2] <= e[-2] and closes[-1] > e[-1]:
+                        if e[-1] < e[-1 - EMA_SLOPE_BARS]:
+                            continue  # EMA 선이 내려가는 중이면 제외
                         above = (closes[-1] / e[-1] - 1) * 100
                         if above <= EMA_MAX_PCT:
                             found.append((f"ema{n}", f"{name}  EMA{n} 위 +{above:.1f}%  이번봉 {chg:+.1f}%"))
