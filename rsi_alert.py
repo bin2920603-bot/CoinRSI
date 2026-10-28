@@ -12,6 +12,7 @@ LIVE_RSI_MIN_CHG = 0.5 # 진행중 RSI 알림은 이번 봉이 이 % 이상 올�
 EMA_MAX_PCT = 1.0      # EMA 위로 이 % 이내일 때만 알림 (너무 오른 건 제외)
 EMA_SLOPE_BARS = 3     # EMA 돌파: EMA 선이 이 봉 수 전보다 낮으면(내려가는 중이면) 제외
 VOL_MIN_ELAPSED = 0.1  # 진행중 봉 거래량 비교: 봉이 이 비율 이상 지났을 때만 계산
+VOL_AVG_BARS = 20      # 거래량 평균을 낼 봉 개수 (평균 대비 ×배)
 BASE_LOOKBACK = 48     # 바닥 횡보 돌파: 저점을 볼 봉 개수
 BASE_RISE_PCT = 10     # 바닥 횡보 돌파: 저점 대비 이 % 이내일 때만
 BASE_SPIKE_BARS = 24   # 바닥 횡보 돌파: 최근 몇 봉 안에 급등 이력이 있는지 볼 개수
@@ -60,21 +61,29 @@ def ema(values, n):
 
 
 def vol_text(cs, mode, bar, now):
-    """직전 봉 대비 거래량 변화(%). 늘면 🔴, 줄면 🔵. 진행중 봉은 지금까지 쌓인 속도를 봉 전체 길이로 환산."""
+    """거래량: 직전 봉 대비 %(늘면 🔴, 줄면 🔵) + 최근 20봉 평균 대비 ×배.
+    진행중 봉은 지금까지 쌓인 속도를 봉 전체 길이로 환산."""
     try:
         cur = float(cs[-1][7])
         prev = float(cs[-2][7])
-        if prev <= 0:
-            return "  거래량 -"
         if mode == "live":
             dur = BAR_MS[bar]
             elapsed = now - int(cs[-1][0])
             if elapsed < dur * VOL_MIN_ELAPSED:
                 return "  거래량 -"
             cur = cur * dur / min(elapsed, dur)
-        pct = (cur / prev - 1) * 100
-        icon = "🔴" if pct >= 0 else "🔵"
-        return f"  {icon}거래량 {pct:+.0f}%"
+        past = [float(x[7]) for x in cs[-1 - VOL_AVG_BARS:-1]]
+        avg = sum(past) / len(past) if past else 0
+        parts = []
+        if prev > 0:
+            pct = (cur / prev - 1) * 100
+            icon = "🔴" if pct >= 0 else "🔵"
+            parts.append(f"{icon}직전 {pct:+.0f}%")
+        if avg > 0:
+            parts.append(f"평균 ×{cur / avg:.1f}")
+        if not parts:
+            return "  거래량 -"
+        return "  " + " · ".join(parts)
     except Exception:
         return "  거래량 -"
 
