@@ -13,6 +13,8 @@ EMA_MAX_PCT = 1.0      # EMA 위로 이 % 이내일 때만 알림 (너무 오른
 EMA_SLOPE_BARS = 3     # EMA 돌파: EMA 선이 이 봉 수 전보다 낮으면(내려가는 중이면) 제외
 TREND_SLOPE = 3        # 추세: EMA50이 이 봉 수 전보다 높아야 상승으로 인정
 DD_BARS = 100          # 고점 대비 낙폭: 최근 몇 봉의 고점을 볼지
+HIGH_BARS = 48         # 직전 고점 저항: 최근 몇 봉의 고점을 볼지 (방금 봉 제외)
+VOL_WEAK = 0.7         # 거래량이 최근 평균의 이 배수 미만이면 '거래량 약함' 표시
 STOP_BARS = 10         # 접는 선: 최근 몇 봉의 저점을 볼지
 STOP_BIG_PCT = 5       # 접는 선까지 거리가 이 % 이상이면 '손절폭 큼' 표시
 VOL_MIN_ELAPSED = 0.1  # 진행중 봉 거래량 비교: 봉이 이 비율 이상 지났을 때만 계산
@@ -123,8 +125,9 @@ def day_line(bar, tr, dt, label):
 
 
 def ctx_info(cs, closes):
-    """(위 저항 %, 저항 이름, 고점 대비 낙폭 %).
-    저항 이름: 선 이름 / "없음"(가격 위에 선이 없음) / ""(계산 불가)"""
+    """(위 저항 %, 저항 이름, 고점 대비 낙폭 %, 직전 고점까지 %).
+    저항 이름: 선 이름 / "없음"(가격 위에 선이 없음) / ""(계산 불가)
+    직전 고점까지 %: 양수면 그만큼 위에 고점이 있음, 0 이하면 이미 넘음"""
     try:
         p = closes[-1]
         lines = {}
@@ -148,17 +151,27 @@ def ctx_info(cs, closes):
             rs, name = None, "없음"
         hi = max(float(x[2]) for x in cs[-DD_BARS:])
         dd = (p / hi - 1) * 100 if hi > 0 else None
-        return rs, name, dd
+        hp = None
+        prev = cs[-1 - HIGH_BARS:-1]
+        if prev and p > 0:
+            hi_prev = max(float(x[2]) for x in prev)
+            hp = (hi_prev / p - 1) * 100
+        return rs, name, dd, hp
     except Exception:
-        return None, "", None
+        return None, "", None, None
 
 
-def ctx_text(rs, name, dd):
+def ctx_text(rs, name, dd, hp):
     parts = []
     if rs is not None:
         parts.append(f"위 저항 +{rs:.1f}%({name})")
     elif name == "없음":
         parts.append("위 저항 없음")
+    if hp is not None:
+        if hp > 0:
+            parts.append(f"직전 고점 +{hp:.1f}%")
+        else:
+            parts.append("직전 고점 돌파")
     if dd is not None:
         parts.append(f"고점 대비 {dd:.0f}%")
     return "  ".join(parts)
@@ -236,7 +249,10 @@ def vol_text(pct, x):
         parts.append(f"{'🔴' if pct >= 0 else '🔵'}직전 {pct:+.0f}%")
     if x is not None:
         parts.append(f"평균 ×{x:.1f}")
-    return " · ".join(parts) if parts else "거래량 -"
+    t = " · ".join(parts) if parts else "거래량 -"
+    if x is not None and x < VOL_WEAK:
+        t += " ⚠️거래량 약함"
+    return t
 
 
 def telegram(token, chat, text):
@@ -323,10 +339,15 @@ def make_report(log, now):
         ("×0.5~1", [e for e in rows if isnum(e.get("vx")) and 0.5 <= e["vx"] < 1]),
         ("×1~2", [e for e in rows if isnum(e.get("vx")) and 1 <= e["vx"] < 2]),
         ("×2 이상", [e for e in rows if isnum(e.get("vx")) and e["vx"] >= 2])])
-    section("■ 위 저항까지 거리", [
+    section("■ 위 저항(선)까지 거리", [
         ("2% 이내", [e for e in rows if isnum(e.get("rs")) and e["rs"] < 2]),
         ("2~5%", [e for e in rows if isnum(e.get("rs")) and 2 <= e["rs"] < 5]),
         ("5% 이상", [e for e in rows if isnum(e.get("rs")) and e["rs"] >= 5])])
+    section("■ 직전 고점까지 거리", [
+        ("이미 돌파", [e for e in rows if isnum(e.get("hp")) and e["hp"] <= 0]),
+        ("2% 이내", [e for e in rows if isnum(e.get("hp")) and 0 < e["hp"] < 2]),
+        ("2~5%", [e for e in rows if isnum(e.get("hp")) and 2 <= e["hp"] < 5]),
+        ("5% 이상", [e for e in rows if isnum(e.get("hp")) and e["hp"] >= 5])])
     section("■ 고점 대비 낙폭", [
         ("-20% 이내", [e for e in rows if isnum(e.get("dd")) and e["dd"] > -20]),
         ("-20~-50%", [e for e in rows if isnum(e.get("dd")) and -50 < e["dd"] <= -20]),
@@ -363,7 +384,7 @@ def main():
 
     update_log(log, prices, now)
 
-    def add_log(inst, bar, kind, mode, price, vp, vx, tr, rs, dd, sl):
+    def add_log(inst, bar, kind, mode, price, vp, vx, tr, rs, dd, sl, hp):
         log.append({"t": now, "i": inst, "b": bar, "k": kind, "m": mode, "p": price,
                     "vp": None if vp is None else round(vp, 1),
                     "vx": None if vx is None else round(vx, 2),
@@ -371,6 +392,7 @@ def main():
                     "rs": None if rs is None else round(rs, 2),
                     "dd": None if dd is None else round(dd, 1),
                     "sl": None if sl is None else round(sl, 2),
+                    "hp": None if hp is None else round(hp, 2),
                     "r1": None, "r4": None, "r24": None})
 
     hits = {label: [] for _, label in BARS}
@@ -406,9 +428,9 @@ def main():
                 chg = (closes[-1] / float(cs[-1][1]) - 1) * 100 if float(cs[-1][1]) else 0
                 vp, vx = vol_info(cs, mode, bar, now)
                 tr = trend_code(closes)
-                rs, rname, dd = ctx_info(cs, closes)
+                rs, rname, dd, hp = ctx_info(cs, closes)
                 vl = vol_text(vp, vx)                    # 거래량
-                cl = ctx_text(rs, rname, dd)             # 위 저항 + 고점 대비
+                cl = ctx_text(rs, rname, dd, hp)         # 위 저항 + 직전 고점 + 고점 대비
 
                 found = []   # (종류, 문구, 접는 선 거리%)
                 r = rsi(closes, RSI_SIGNAL)
@@ -456,7 +478,7 @@ def main():
                                 dl = day_line(bar, tr, daily_trend(inst), label)
                                 bases.append(f"[{label}·{btag}]\n" + block(name, dl, mid, vl, cl, st))
                                 sent[bkey] = ts
-                                add_log(inst, bar, "base", mode, closes[-1], vp, vx, tr, rs, dd, sl)
+                                add_log(inst, bar, "base", mode, closes[-1], vp, vx, tr, rs, dd, sl, hp)
 
                 for kind, text, sl in found:
                     key = f"{inst}|{bar}|{kind}" + ("|live" if mode == "live" else "")
@@ -465,7 +487,7 @@ def main():
                         tag = f"{what}·진행중" if mode == "live" else f"{what}·마감확정"
                         hits[label].append(f"[{tag}]\n{text}")
                         sent[key] = ts
-                        add_log(inst, bar, kind, mode, closes[-1], vp, vx, tr, rs, dd, sl)
+                        add_log(inst, bar, kind, mode, closes[-1], vp, vx, tr, rs, dd, sl, hp)
 
     # 종목마다 한 줄씩 띄워서 보낸다
     parts = [f"━ {label} ━\n\n" + "\n\n".join(v) for label, v in hits.items() if v]
