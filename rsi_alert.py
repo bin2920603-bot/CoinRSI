@@ -15,6 +15,9 @@ TREND_SLOPE = 3        # 추세: EMA50이 이 봉 수 전보다 높아야 상승
 DD_BARS = 100          # 고점 대비 낙폭: 최근 몇 봉의 고점을 볼지
 HIGH_BARS = 48         # 직전 고점 저항: 최근 몇 봉의 고점을 볼지 (방금 봉 제외)
 VOL_WEAK = 0.7         # 거래량이 최근 평균의 이 배수 미만이면 '거래량 약함' 표시
+ENTRY_VOL = 1.5        # ✅진입후보: 거래량이 평균의 이 배수 이상
+ENTRY_ROOM = 2         # ✅진입후보: 위 저항·직전 고점까지 이 % 넘게 여유
+ENTRY_STOP = 3         # ✅진입후보: 접는 선까지 거리가 이 % 이내
 STOP_BARS = 10         # 접는 선: 최근 몇 봉의 저점을 볼지
 STOP_BIG_PCT = 5       # 접는 선까지 거리가 이 % 이상이면 '손절폭 큼' 표시
 VOL_MIN_ELAPSED = 0.1  # 진행중 봉 거래량 비교: 봉이 이 비율 이상 지났을 때만 계산
@@ -177,6 +180,26 @@ def ctx_text(rs, name, dd, hp):
     return "  ".join(parts)
 
 
+def entry_ok(vx, rs, hp, sl, tr):
+    """✅진입후보: 4개 조건이 모두 맞을 때만 True (계산 못 한 값이 있으면 False).
+    1) 거래량 평균 ×ENTRY_VOL 이상
+    2) 위 저항 선·직전 고점까지 ENTRY_ROOM% 넘게 여유 (저항이 없거나 이미 넘었으면 통과)
+    3) 접는 선까지 -ENTRY_STOP% 이내
+    4) 알림 봉 추세가 상승 또는 혼조"""
+    try:
+        if vx is None or vx < ENTRY_VOL:
+            return False
+        if rs is not None and rs < ENTRY_ROOM:
+            return False
+        if hp is None or (0 < hp < ENTRY_ROOM):
+            return False
+        if sl is None or sl <= -ENTRY_STOP:
+            return False
+        return tr in ("up", "mix")
+    except Exception:
+        return False
+
+
 def stop_info(cs, price, ref=None):
     """접는 선: 최근 저점과 돌파한 EMA선 바로 아래 중 현재가에 더 가까운 쪽.
     (글자, 현재가 대비 거리 %) 를 돌려준다."""
@@ -324,6 +347,14 @@ def make_report(log, now):
             lines.extend(out)
             lines.append("")
 
+    en_yes = [e for e in rows if e.get("en") is True]
+    en_no = [e for e in rows if e.get("en") is False]
+    section("■ ✅진입후보 vs 나머지", [
+        ("✅진입후보 표시", en_yes),
+        ("표시 없음", en_no),
+        ("  진입후보 중 진행중", [e for e in en_yes if e["m"] == "live"]),
+        ("  진입후보 중 마감확정", [e for e in en_yes if e["m"] == "close"])])
+
     kn = {"rsi": "RSI 반등", "ema20": "EMA20 돌파", "ema50": "EMA50 돌파", "ema7": "EMA7 돌파", "base": "🎯바닥횡보"}
     section("■ 알림 종류", [(kn[k], [e for e in rows if e["k"] == k]) for k in kn])
     section("■ 알림 봉 추세", [("📈상승", [e for e in rows if e.get("tr") == "up"]),
@@ -384,7 +415,7 @@ def main():
 
     update_log(log, prices, now)
 
-    def add_log(inst, bar, kind, mode, price, vp, vx, tr, rs, dd, sl, hp):
+    def add_log(inst, bar, kind, mode, price, vp, vx, tr, rs, dd, sl, hp, en):
         log.append({"t": now, "i": inst, "b": bar, "k": kind, "m": mode, "p": price,
                     "vp": None if vp is None else round(vp, 1),
                     "vx": None if vx is None else round(vx, 2),
@@ -393,10 +424,12 @@ def main():
                     "dd": None if dd is None else round(dd, 1),
                     "sl": None if sl is None else round(sl, 2),
                     "hp": None if hp is None else round(hp, 2),
+                    "en": bool(en),
                     "r1": None, "r4": None, "r24": None})
 
     hits = {label: [] for _, label in BARS}
     bases = []
+    entries = []   # ✅진입후보로 따로 보낼 알림
     for vol, inst in rows[:TOP_N]:
         name = inst.replace("-USDT-SWAP", "")
         for bar, label in BARS:
@@ -476,29 +509,42 @@ def main():
                                 mid = (f"저점 대비 +{rise:.1f}%  EMA뭉침 {squeeze:.1f}%\n"
                                        f"최근고점 +{spike:.1f}%  이번봉 {chg:+.1f}%")
                                 dl = day_line(bar, tr, daily_trend(inst), label)
-                                bases.append(f"[{label}·{btag}]\n" + block(name, dl, mid, vl, cl, st))
+                                btext = block(name, dl, mid, vl, cl, st)
+                                bases.append(f"[{label}·{btag}]\n" + btext)
+                                en = entry_ok(vx, rs, hp, sl, tr)
+                                if en:
+                                    entries.append(f"[{label}·🎯바닥횡보·{btag}]\n" + btext)
                                 sent[bkey] = ts
-                                add_log(inst, bar, "base", mode, closes[-1], vp, vx, tr, rs, dd, sl, hp)
+                                add_log(inst, bar, "base", mode, closes[-1], vp, vx, tr, rs, dd, sl, hp, en)
 
                 for kind, text, sl in found:
                     key = f"{inst}|{bar}|{kind}" + ("|live" if mode == "live" else "")
                     if sent.get(key) != ts:
                         what = "RSI 반등" if kind == "rsi" else f"{kind.upper()} 돌파"
                         tag = f"{what}·진행중" if mode == "live" else f"{what}·마감확정"
+                        en = entry_ok(vx, rs, hp, sl, tr)
                         hits[label].append(f"[{tag}]\n{text}")
+                        if en:
+                            entries.append(f"[{label}·{tag}]\n{text}")
                         sent[key] = ts
-                        add_log(inst, bar, kind, mode, closes[-1], vp, vx, tr, rs, dd, sl, hp)
+                        add_log(inst, bar, kind, mode, closes[-1], vp, vx, tr, rs, dd, sl, hp, en)
 
     # 종목마다 한 줄씩 띄워서 보낸다
     parts = [f"━ {label} ━\n\n" + "\n\n".join(v) for label, v in hits.items() if v]
     if bases:
         parts.insert(0, "🎯 바닥 횡보 돌파 🎯\n\n" + "\n\n".join(bases))
+    btc = btc_line() if (parts or entries) else ""
+    if entries:
+        head = ("<b>✅ 진입 후보 ✅</b>\n"
+                f"(거래량 ×{ENTRY_VOL}↑ · 저항 여유 {ENTRY_ROOM}%↑ · 접는 선 -{ENTRY_STOP}% 이내 · 추세 상승/혼조)\n"
+                "참고용이에요. 오른다는 보장은 아니고, 성적표로 확인 중이에요.")
+        msg = head + "\n\n" + "\n\n".join(entries)
+        telegram(token, chat, (btc + "\n\n" if btc else "") + msg)
     if parts:
-        btc = btc_line()
-        if btc:
+        if btc and not entries:
             parts.insert(0, btc)
         telegram(token, chat, "\n\n\n".join(parts))
-    elif first:
+    elif first and not entries:
         telegram(token, chat, "✅ RSI 알림이 켜졌어요. 조건에 맞는 코인이 나오면 알려 드려요.")
 
     # 매일 아침 성적표
