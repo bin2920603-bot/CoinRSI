@@ -60,7 +60,7 @@ def ema(values, n):
 
 
 def vol_text(cs, mode, bar, now):
-    """직전 봉 대비 거래량 변화(%). 진행중 봉은 지금까지 쌓인 속도를 봉 전체 길이로 환산."""
+    """직전 봉 대비 거래량 변화(%). 늘면 🔴, 줄면 🔵. 진행중 봉은 지금까지 쌓인 속도를 봉 전체 길이로 환산."""
     try:
         cur = float(cs[-1][7])
         prev = float(cs[-2][7])
@@ -72,7 +72,9 @@ def vol_text(cs, mode, bar, now):
             if elapsed < dur * VOL_MIN_ELAPSED:
                 return "  거래량 -"
             cur = cur * dur / min(elapsed, dur)
-        return f"  거래량 {(cur / prev - 1) * 100:+.0f}%"
+        pct = (cur / prev - 1) * 100
+        icon = "🔴" if pct >= 0 else "🔵"
+        return f"  {icon}거래량 {pct:+.0f}%"
     except Exception:
         return "  거래량 -"
 
