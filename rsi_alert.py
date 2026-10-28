@@ -7,6 +7,8 @@ RSI_SIGNAL = 6         # 알림 기준 RSI (차트의 RSI6)
 RSI_SHOW = (6, 12, 24) # 알림에 같이 보여 줄 RSI
 EMAS = (20, 50)        # 가격이 위로 뚫는지 볼 EMA
 LONG_BARS = ("1D", "1W", "1M")  # 이 봉에서는 EMA7도 봄
+RSI_MAX = 40           # 반등 후 RSI6이 이 값 이하일 때만 알림 (너무 오른 건 제외)
+EMA_MAX_PCT = 1.0      # EMA 위로 이 % 이내일 때만 알림 (너무 오른 건 제외)
 WINDOW_MIN = 45        # 마감된 지 몇 분 이내의 봉만 알릴지
 BARS = [("1H", "1시간봉"), ("2H", "2시간봉"), ("4H", "4시간봉"),
         ("1D", "일봉"), ("1W", "주봉"), ("1M", "월봉")]
@@ -48,11 +50,19 @@ def ema(values, n):
 
 
 def telegram(token, chat, text):
-    requests.post(
-        f"https://api.telegram.org/bot{token}/sendMessage",
-        data={"chat_id": chat, "text": text},
-        timeout=15,
-    )
+    chunks, cur = [], ""
+    for line in text.split("\n"):
+        if len(cur) + len(line) + 1 > 3800:
+            chunks.append(cur)
+            cur = ""
+        cur += line + "\n"
+    chunks.append(cur)
+    for part in chunks:
+        requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            data={"chat_id": chat, "text": part.strip()},
+            timeout=15,
+        )
 
 
 def main():
@@ -84,35 +94,47 @@ def main():
                 continue
             if not c:
                 continue
-            # 방금 마감된 봉인지 확인 (진행 중인 봉의 시작 시각 = 직전 봉의 마감 시각)
-            close_time = int(c[0][0]) if c[0][8] == "0" else now
-            if now - close_time > WINDOW_MIN * 60000:
+            live = c[0] if c[0][8] == "0" else None          # 진행 중인 봉
+            done = [x for x in c if x[8] == "1"][::-1]       # 마감된 봉, 오래된 순
+            if len(done) < 8:
                 continue
-            c = [x for x in c if x[8] == "1"][::-1]  # 마감된 봉만, 오래된 순
-            if len(c) < 8:
-                continue
-            ts = c[-1][0]
-            closes = [float(x[4]) for x in c]
+            # 방금 마감된 봉인지 (진행 중인 봉의 시작 시각 = 직전 봉의 마감 시각)
+            close_time = int(live[0]) if live else now
+            recent = now - close_time <= WINDOW_MIN * 60000
 
-            found = []
-            r = rsi(closes, RSI_SIGNAL)
-            if len(r) >= 2 and r[-2] <= LOW < r[-1]:
-                shown = []
-                for n in RSI_SHOW:
-                    rr = rsi(closes, n)
-                    shown.append(f"{rr[-1]:.0f}" if rr else "-")
-                found.append(("rsi", f"{name}  RSI{RSI_SIGNAL} {r[-2]:.1f}→{r[-1]:.1f}  (RSI {'/'.join(shown)})"))
-            for n in ((7,) + EMAS if bar in LONG_BARS else EMAS):
-                e = ema(closes, n)
-                if len(e) >= 2 and closes[-2] <= e[-2] and closes[-1] > e[-1]:
-                    found.append((f"ema{n}", f"{name}  EMA{n} 돌파"))
+            cases = []   # (모드, 봉 목록)
+            if recent:
+                cases.append(("close", done))
+            if live:
+                cases.append(("live", done + [live]))
 
-            for kind, line in found:
-                key = f"{inst}|{bar}|{kind}"
-                if sent.get(key) != ts:
-                    tag = "RSI 반등" if kind == "rsi" else f"{kind.upper()} 돌파"
-                    hits[label].append(f"[{tag}] {line}")
-                    sent[key] = ts
+            for mode, cs in cases:
+                ts = cs[-1][0]
+                closes = [float(x[4]) for x in cs]
+                chg = (closes[-1] / float(cs[-1][1]) - 1) * 100 if float(cs[-1][1]) else 0
+
+                found = []
+                r = rsi(closes, RSI_SIGNAL)
+                if len(r) >= 2 and r[-2] <= LOW < r[-1] <= RSI_MAX:
+                    shown = []
+                    for n in RSI_SHOW:
+                        rr = rsi(closes, n)
+                        shown.append(f"{rr[-1]:.0f}" if rr else "-")
+                    found.append(("rsi", f"{name}  RSI{RSI_SIGNAL} {r[-2]:.1f}→{r[-1]:.1f}  (RSI {'/'.join(shown)})  이번봉 {chg:+.1f}%"))
+                for n in ((7,) + EMAS if bar in LONG_BARS else EMAS):
+                    e = ema(closes, n)
+                    if len(e) >= 2 and closes[-2] <= e[-2] and closes[-1] > e[-1]:
+                        above = (closes[-1] / e[-1] - 1) * 100
+                        if above <= EMA_MAX_PCT:
+                            found.append((f"ema{n}", f"{name}  EMA{n} 위 +{above:.1f}%  이번봉 {chg:+.1f}%"))
+
+                for kind, line in found:
+                    key = f"{inst}|{bar}|{kind}" + ("|live" if mode == "live" else "")
+                    if sent.get(key) != ts:
+                        what = "RSI 반등" if kind == "rsi" else f"{kind.upper()} 돌파"
+                        tag = f"{what}·진행중" if mode == "live" else f"{what}·마감확정"
+                        hits[label].append(f"[{tag}] {line}")
+                        sent[key] = ts
 
     parts = [f"━ {label} ━\n" + "\n".join(v) for label, v in hits.items() if v]
     if parts:
