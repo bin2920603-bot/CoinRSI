@@ -9,6 +9,9 @@ EMAS = (20, 50)        # 가격이 위로 뚫는지 볼 EMA
 LONG_BARS = ("1D", "1W", "1M")  # 이 봉에서는 EMA7도 봄
 RSI_MAX = 40           # 반등 후 RSI6이 이 값 이하일 때만 알림 (너무 오른 건 제외)
 EMA_MAX_PCT = 1.0      # EMA 위로 이 % 이내일 때만 알림 (너무 오른 건 제외)
+BASE_LOOKBACK = 48     # 바닥 횡보 돌파: 저점을 볼 봉 개수
+BASE_RISE_PCT = 10     # 바닥 횡보 돌파: 저점 대비 이 % 이내일 때만
+SQUEEZE_PCT = 3        # 바닥 횡보 돌파: 직전 10봉 EMA7·20·50이 평균 이 % 이내로 뭉쳐 있을 때만
 WINDOW_MIN = 45        # 마감된 지 몇 분 이내의 봉만 알릴지
 BARS = [("1H", "1시간봉"), ("2H", "2시간봉"), ("4H", "4시간봉"),
         ("1D", "일봉"), ("1W", "주봉"), ("1M", "월봉")]
@@ -83,6 +86,7 @@ def main():
     rows.sort(reverse=True)
 
     hits = {label: [] for _, label in BARS}
+    bases = []
     for vol, inst in rows[:TOP_N]:
         name = inst.replace("-USDT-SWAP", "")
         for bar, label in BARS:
@@ -128,6 +132,24 @@ def main():
                         if above <= EMA_MAX_PCT:
                             found.append((f"ema{n}", f"{name}  EMA{n} 위 +{above:.1f}%  이번봉 {chg:+.1f}%"))
 
+                # 🎯 바닥 횡보 돌파: 저점 근처 + EMA 뭉침 + EMA20 위로 첫 돌파
+                if len(cs) >= 60:
+                    e7, e20, e50 = ema(closes, 7), ema(closes, 20), ema(closes, 50)
+                    if len(e50) >= 12 and closes[-2] <= e20[-2] and closes[-1] > e20[-1]:
+                        spread = []
+                        for i in range(2, 12):
+                            a, b, c3 = e7[-i], e20[-i], e50[-i]
+                            spread.append((max(a, b, c3) - min(a, b, c3)) / b * 100)
+                        squeeze = sum(spread) / len(spread)
+                        low_n = min(float(x[3]) for x in cs[-BASE_LOOKBACK:])
+                        rise = (closes[-1] / low_n - 1) * 100 if low_n > 0 else 999
+                        if squeeze <= SQUEEZE_PCT and rise <= BASE_RISE_PCT:
+                            bkey = f"{inst}|{bar}|base" + ("|live" if mode == "live" else "")
+                            if sent.get(bkey) != ts:
+                                btag = "진행중" if mode == "live" else "마감확정"
+                                bases.append(f"[{label}·{btag}] {name}  저점 대비 +{rise:.1f}%  EMA뭉침 {squeeze:.1f}%  이번봉 {chg:+.1f}%")
+                                sent[bkey] = ts
+
                 for kind, line in found:
                     key = f"{inst}|{bar}|{kind}" + ("|live" if mode == "live" else "")
                     if sent.get(key) != ts:
@@ -137,6 +159,8 @@ def main():
                         sent[key] = ts
 
     parts = [f"━ {label} ━\n" + "\n".join(v) for label, v in hits.items() if v]
+    if bases:
+        parts.insert(0, "🎯 바닥 횡보 돌파 🎯\n" + "\n".join(bases))
     if parts:
         telegram(token, chat, "\n\n".join(parts))
     elif first:
