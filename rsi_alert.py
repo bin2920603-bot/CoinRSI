@@ -13,6 +13,8 @@ EMA_MAX_PCT = 1.0      # EMA 위로 이 % 이내일 때만 알림 (너무 오른
 EMA_SLOPE_BARS = 3     # EMA 돌파: EMA 선이 이 봉 수 전보다 낮으면(내려가는 중이면) 제외
 TREND_SLOPE = 3        # 추세: EMA50이 이 봉 수 전보다 높아야 상승으로 인정
 DD_BARS = 100          # 고점 대비 낙폭: 최근 몇 봉의 고점을 볼지
+STOP_BARS = 10         # 접는 선: 최근 몇 봉의 저점을 볼지
+STOP_BIG_PCT = 5       # 접는 선까지 거리가 이 % 이상이면 '손절폭 큼' 표시
 VOL_MIN_ELAPSED = 0.1  # 진행중 봉 거래량 비교: 봉이 이 비율 이상 지났을 때만 계산
 VOL_AVG_BARS = 20      # 거래량 평균을 낼 봉 개수 (평균 대비 ×배)
 BASE_LOOKBACK = 48     # 바닥 횡보 돌파: 저점을 볼 봉 개수
@@ -131,6 +133,26 @@ def ctx_text(rs, name, dd):
     if dd is not None:
         parts.append(f"고점 대비 {dd:.0f}%")
     return "  " + "  ".join(parts) if parts else ""
+
+
+def stop_info(cs, price, ref=None):
+    """접는 선: 최근 저점과 돌파한 EMA선 바로 아래 중 현재가에 더 가까운 쪽.
+    (글자, 현재가 대비 거리 %) 를 돌려준다."""
+    try:
+        cands = [min(float(x[3]) for x in cs[-STOP_BARS:])]
+        if ref:
+            cands.append(ref)
+        below = [c for c in cands if c < price]
+        if not below:
+            return "  접는 선 -", None
+        s = max(below)
+        pct = (s / price - 1) * 100
+        t = f"  접는 선 {s:.6g}({pct:.1f}%)"
+        if pct <= -STOP_BIG_PCT:
+            t += " 손절폭 큼"
+        return t, pct
+    except Exception:
+        return "  접는 선 -", None
 
 
 def btc_line():
@@ -260,6 +282,10 @@ def make_report(log, now):
         ("-20% 이내", [e for e in rows if isnum(e.get("dd")) and e["dd"] > -20]),
         ("-20~-50%", [e for e in rows if isnum(e.get("dd")) and -50 < e["dd"] <= -20]),
         ("-50% 넘게 하락", [e for e in rows if isnum(e.get("dd")) and e["dd"] <= -50])])
+    section("■ 접는 선까지 거리", [
+        ("-2% 이내", [e for e in rows if isnum(e.get("sl")) and e["sl"] > -2]),
+        ("-2~-5%", [e for e in rows if isnum(e.get("sl")) and -5 < e["sl"] <= -2]),
+        ("-5% 넘게(손절폭 큼)", [e for e in rows if isnum(e.get("sl")) and e["sl"] <= -5])])
     section("■ 진행중 / 마감확정", [("진행중", [e for e in rows if e["m"] == "live"]),
                                     ("마감확정", [e for e in rows if e["m"] == "close"])])
     lines.append("건수가 적은 칸은 우연일 수 있어요. 며칠 더 쌓이면 믿을 만해져요.")
@@ -288,13 +314,14 @@ def main():
 
     update_log(log, prices, now)
 
-    def add_log(inst, bar, kind, mode, price, vp, vx, tr, rs, dd):
+    def add_log(inst, bar, kind, mode, price, vp, vx, tr, rs, dd, sl):
         log.append({"t": now, "i": inst, "b": bar, "k": kind, "m": mode, "p": price,
                     "vp": None if vp is None else round(vp, 1),
                     "vx": None if vx is None else round(vx, 2),
                     "tr": tr,
                     "rs": None if rs is None else round(rs, 2),
                     "dd": None if dd is None else round(dd, 1),
+                    "sl": None if sl is None else round(sl, 2),
                     "r1": None, "r4": None, "r24": None})
 
     hits = {label: [] for _, label in BARS}
@@ -333,14 +360,15 @@ def main():
                 rs, rname, dd = ctx_info(cs, closes)
                 vt = vol_text(vp, vx) + trend_text(tr) + ctx_text(rs, rname, dd)
 
-                found = []
+                found = []   # (종류, 문구, 접는 선 거리%)
                 r = rsi(closes, RSI_SIGNAL)
                 if len(r) >= 2 and r[-2] <= LOW < r[-1] <= RSI_MAX and (mode == "close" or chg >= LIVE_RSI_MIN_CHG):
                     shown = []
                     for n in RSI_SHOW:
                         rr = rsi(closes, n)
                         shown.append(f"{rr[-1]:.0f}" if rr else "-")
-                    found.append(("rsi", f"{name}  RSI{RSI_SIGNAL} {r[-2]:.1f}→{r[-1]:.1f}  (RSI {'/'.join(shown)})  이번봉 {chg:+.1f}%{vt}"))
+                    st, sl = stop_info(cs, closes[-1])
+                    found.append(("rsi", f"{name}  RSI{RSI_SIGNAL} {r[-2]:.1f}→{r[-1]:.1f}  (RSI {'/'.join(shown)})  이번봉 {chg:+.1f}%{vt}{st}", sl))
                 for n in ((7,) + EMAS if bar in LONG_BARS else EMAS):
                     e = ema(closes, n)
                     if len(e) > EMA_SLOPE_BARS and closes[-2] <= e[-2] and closes[-1] > e[-1]:
@@ -348,7 +376,8 @@ def main():
                             continue  # EMA 선이 내려가는 중이면 제외
                         above = (closes[-1] / e[-1] - 1) * 100
                         if above <= EMA_MAX_PCT:
-                            found.append((f"ema{n}", f"{name}  EMA{n} 위 +{above:.1f}%  이번봉 {chg:+.1f}%{vt}"))
+                            st, sl = stop_info(cs, closes[-1], e[-1] * 0.998)
+                            found.append((f"ema{n}", f"{name}  EMA{n} 위 +{above:.1f}%  이번봉 {chg:+.1f}%{vt}{st}", sl))
 
                 # 🎯 바닥 횡보 돌파: 저점 근처 + EMA 뭉침 + EMA20 위로 첫 돌파
                 if len(cs) >= 60:
@@ -367,18 +396,19 @@ def main():
                             bkey = f"{inst}|{bar}|base" + ("|live" if mode == "live" else "")
                             if sent.get(bkey) != ts:
                                 btag = "진행중" if mode == "live" else "마감확정"
-                                bases.append(f"[{label}·{btag}] {name}  저점 대비 +{rise:.1f}%  EMA뭉침 {squeeze:.1f}%  최근고점 +{spike:.1f}%  이번봉 {chg:+.1f}%{vt}")
+                                st, sl = stop_info(cs, closes[-1], e20[-1] * 0.998)
+                                bases.append(f"[{label}·{btag}] {name}  저점 대비 +{rise:.1f}%  EMA뭉침 {squeeze:.1f}%  최근고점 +{spike:.1f}%  이번봉 {chg:+.1f}%{vt}{st}")
                                 sent[bkey] = ts
-                                add_log(inst, bar, "base", mode, closes[-1], vp, vx, tr, rs, dd)
+                                add_log(inst, bar, "base", mode, closes[-1], vp, vx, tr, rs, dd, sl)
 
-                for kind, line in found:
+                for kind, line, sl in found:
                     key = f"{inst}|{bar}|{kind}" + ("|live" if mode == "live" else "")
                     if sent.get(key) != ts:
                         what = "RSI 반등" if kind == "rsi" else f"{kind.upper()} 돌파"
                         tag = f"{what}·진행중" if mode == "live" else f"{what}·마감확정"
                         hits[label].append(f"[{tag}] {line}")
                         sent[key] = ts
-                        add_log(inst, bar, kind, mode, closes[-1], vp, vx, tr, rs, dd)
+                        add_log(inst, bar, kind, mode, closes[-1], vp, vx, tr, rs, dd, sl)
 
     parts = [f"━ {label} ━\n" + "\n".join(v) for label, v in hits.items() if v]
     if bases:
