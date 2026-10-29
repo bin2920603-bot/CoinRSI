@@ -15,6 +15,8 @@ TREND_SLOPE = 3        # 추세: EMA50이 이 봉 수 전보다 높아야 상승
 DD_BARS = 100          # 고점 대비 낙폭: 최근 몇 봉의 고점을 볼지
 HIGH_BARS = 48         # 직전 고점 저항: 최근 몇 봉의 고점을 볼지 (방금 봉 제외)
 VOL_WEAK = 0.7         # 거래량이 최근 평균의 이 배수 미만이면 '거래량 약함' 표시
+VOL_STRONG = 2.0       # 거래량이 최근 평균의 이 배수 이상이면 '거래량 강함' 표시
+VOL_RISING = 1.5       # 직전 봉보다 늘었고 평균의 이 배수 이상이면 '늘어나는 중' 표시
 ENTRY_VOL = 1.5        # ✅진입후보: 거래량이 평균의 이 배수 이상
 ENTRY_ROOM = 2         # ✅진입후보: 위 저항·직전 고점까지 이 % 넘게 여유
 ENTRY_STOP = 3         # ✅진입후보: 접는 선까지 거리가 이 % 이내
@@ -273,8 +275,13 @@ def vol_text(pct, x):
     if x is not None:
         parts.append(f"평균 ×{x:.1f}")
     t = " · ".join(parts) if parts else "거래량 -"
-    if x is not None and x < VOL_WEAK:
-        t += " ⚠️거래량 약함"
+    if x is not None:
+        if x < VOL_WEAK:
+            t += " ⚠️거래량 약함"
+        elif x >= VOL_STRONG:
+            t += " 🔥거래량 강함"
+        elif x >= VOL_RISING and pct is not None and pct >= 0:
+            t += " 📈늘어나는 중"
     return t
 
 
