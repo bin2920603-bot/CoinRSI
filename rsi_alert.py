@@ -3,6 +3,7 @@ import os, json, time, requests
 OKX = "https://www.okx.com"
 TOP_N = 100            # 거래대금 상위 몇 개를 볼지
 LOW = 30               # RSI 바닥 기준
+NEAR_MIN = 25          # 🟡30임박: RSI6이 이 값 이상 ~ 30 이하이고 올라오는 중일 때
 RSI_SIGNAL = 6         # 알림 기준 RSI (차트의 RSI6)
 RSI_SHOW = (6, 12, 24) # 알림에 같이 보여 줄 RSI
 EMAS = (20, 50)        # 가격이 위로 뚫는지 볼 EMA
@@ -371,7 +372,8 @@ def make_report(log, now):
         ("  진입후보 중 진행중", [e for e in en_yes if e["m"] == "live"]),
         ("  진입후보 중 마감확정", [e for e in en_yes if e["m"] == "close"])])
 
-    kn = {"rsi": "RSI 반등", "ema20": "EMA20 돌파", "ema50": "EMA50 돌파", "ema7": "EMA7 돌파", "base": "🎯바닥횡보"}
+    kn = {"near": "🟡30임박", "rsi": "🟢30돌파", "ema20": "EMA20 돌파", "ema50": "EMA50 돌파",
+          "ema7": "EMA7 돌파", "base": "🎯바닥횡보"}
     section("■ 알림 종류", [(kn[k], [e for e in rows if e["k"] == k]) for k in kn])
     section("■ 알림 봉 추세", [("📈상승", [e for e in rows if e.get("tr") == "up"]),
                             ("📉하락", [e for e in rows if e.get("tr") == "down"]),
@@ -446,6 +448,8 @@ def main():
     hits = {label: [] for _, label in BARS}
     bases = []
     entries = []   # ✅진입후보로 따로 보낼 알림
+    near_list = [] # 🟡 RSI 30 임박
+    cross_list = []  # 🟢 RSI 30 돌파
     for vol, inst in rows[:TOP_N]:
         name = inst.replace("-USDT-SWAP", "")
         for bar, label in BARS:
@@ -481,18 +485,28 @@ def main():
                 vl = vol_text(vp, vx)                    # 거래량
                 cl = ctx_text(rs, rname, dd, hp)         # 위 저항 + 직전 고점 + 고점 대비
                 rt = rsi_now(closes)                     # RSI 숫자 줄
+                tag_mode = "진행중" if mode == "live" else "마감확정"
 
-                found = []   # (종류, 문구, 접는 선 거리%)
+                found = []   # (종류, 문구, 접는 선 거리%, 짧은 문구)
                 r = rsi(closes, RSI_SIGNAL)
+
+                # 🟡 RSI 30 임박: 아직 30을 못 뚫었고, 25~30 사이에서 올라오는 중 (진행중 봉만)
+                if mode == "live" and len(r) >= 2 and NEAR_MIN <= r[-1] <= LOW and r[-1] > r[-2]:
+                    nkey = f"{inst}|{bar}|near"
+                    if sent.get(nkey) != ts:
+                        near_list.append(f"<b>▶ {name}</b> · {label}·{tag_mode}\n"
+                                         f"RSI{RSI_SIGNAL} {r[-1]:.1f} (직전 봉 {r[-2]:.1f})\n{vl}")
+                        sent[nkey] = ts
+                        add_log(inst, bar, "near", mode, closes[-1], vp, vx, tr, rs, dd, None, hp, False)
+
+                # 🟢 RSI 30 돌파
                 if len(r) >= 2 and r[-2] <= LOW < r[-1] <= RSI_MAX and (mode == "close" or chg >= LIVE_RSI_MIN_CHG):
-                    shown = []
-                    for n in RSI_SHOW:
-                        rr = rsi(closes, n)
-                        shown.append(f"{rr[-1]:.0f}" if rr else "-")
                     st, sl = stop_info(cs, closes[-1])
-                    mid = f"RSI{RSI_SIGNAL} {r[-2]:.1f}→{r[-1]:.1f}  (RSI {'/'.join(shown)})  이번봉 {chg:+.1f}%"
+                    mid = f"RSI{RSI_SIGNAL} {r[-2]:.1f}→{r[-1]:.1f}  ({rt})  이번봉 {chg:+.1f}%"
                     dl = day_line(bar, tr, daily_trend(inst), label)
-                    found.append(("rsi", block(name, dl, mid, vl, cl, st), sl))
+                    short = (f"<b>▶ {name}</b> · {label}·{tag_mode}\n"
+                             f"RSI{RSI_SIGNAL} {r[-2]:.1f}→{r[-1]:.1f}  ({rt})  이번봉 {chg:+.1f}%\n{vl}")
+                    found.append(("rsi", block(name, dl, mid, vl, cl, st), sl, short))
                 for n in ((7,) + EMAS if bar in LONG_BARS else EMAS):
                     e = ema(closes, n)
                     if len(e) > EMA_SLOPE_BARS and closes[-2] <= e[-2] and closes[-1] > e[-1]:
@@ -503,7 +517,7 @@ def main():
                             st, sl = stop_info(cs, closes[-1], e[-1] * 0.998)
                             mid = f"EMA{n} 위 +{above:.1f}%  이번봉 {chg:+.1f}%\n{rt}"
                             dl = day_line(bar, tr, daily_trend(inst), label)
-                            found.append((f"ema{n}", block(name, dl, mid, vl, cl, st), sl))
+                            found.append((f"ema{n}", block(name, dl, mid, vl, cl, st), sl, None))
 
                 # 🎯 바닥 횡보 돌파: 저점 근처 + EMA 뭉침 + EMA20 위로 첫 돌파
                 if len(cs) >= 60:
@@ -521,26 +535,28 @@ def main():
                         if squeeze <= SQUEEZE_PCT and rise <= BASE_RISE_PCT and spike <= BASE_SPIKE_PCT:
                             bkey = f"{inst}|{bar}|base" + ("|live" if mode == "live" else "")
                             if sent.get(bkey) != ts:
-                                btag = "진행중" if mode == "live" else "마감확정"
                                 st, sl = stop_info(cs, closes[-1], e20[-1] * 0.998)
                                 mid = (f"저점 대비 +{rise:.1f}%  EMA뭉침 {squeeze:.1f}%\n"
                                        f"최근고점 +{spike:.1f}%  이번봉 {chg:+.1f}%\n{rt}")
                                 dl = day_line(bar, tr, daily_trend(inst), label)
                                 btext = block(name, dl, mid, vl, cl, st)
-                                bases.append(f"[{label}·{btag}]\n" + btext)
+                                bases.append(f"[{label}·{tag_mode}]\n" + btext)
                                 en = entry_ok(vx, rs, hp, sl, tr)
                                 if en:
-                                    entries.append(f"[{label}·🎯바닥횡보·{btag}]\n" + btext)
+                                    entries.append(f"[{label}·🎯바닥횡보·{tag_mode}]\n" + btext)
                                 sent[bkey] = ts
                                 add_log(inst, bar, "base", mode, closes[-1], vp, vx, tr, rs, dd, sl, hp, en)
 
-                for kind, text, sl in found:
+                for kind, text, sl, short in found:
                     key = f"{inst}|{bar}|{kind}" + ("|live" if mode == "live" else "")
                     if sent.get(key) != ts:
                         what = "RSI 반등" if kind == "rsi" else f"{kind.upper()} 돌파"
-                        tag = f"{what}·진행중" if mode == "live" else f"{what}·마감확정"
+                        tag = f"{what}·{tag_mode}"
                         en = entry_ok(vx, rs, hp, sl, tr)
-                        hits[label].append(f"[{tag}]\n{text}")
+                        if kind == "rsi":
+                            cross_list.append(short)          # 🟢 짧은 알림으로 보냄
+                        else:
+                            hits[label].append(f"[{tag}]\n{text}")
                         if en:
                             entries.append(f"[{label}·{tag}]\n{text}")
                         sent[key] = ts
@@ -550,18 +566,28 @@ def main():
     parts = [f"━ {label} ━\n\n" + "\n\n".join(v) for label, v in hits.items() if v]
     if bases:
         parts.insert(0, "🎯 바닥 횡보 돌파 🎯\n\n" + "\n\n".join(bases))
-    btc = btc_line() if (parts or entries) else ""
+    sig = []
+    if near_list:
+        sig.append("🟡 RSI 30 임박 (아직 안 뚫음) 🟡\n\n" + "\n\n".join(near_list))
+    if cross_list:
+        sig.append("🟢 RSI 30 돌파 🟢\n\n" + "\n\n".join(cross_list))
+    btc = btc_line() if (parts or entries or sig) else ""
+    first_sent = False
+    if sig:
+        telegram(token, chat, (btc + "\n\n" if btc else "") + "\n\n\n".join(sig))
+        first_sent = True
     if entries:
         head = ("<b>✅ 진입 후보 ✅</b>\n"
                 f"(거래량 ×{ENTRY_VOL}↑ · 저항 여유 {ENTRY_ROOM}%↑ · 접는 선 -{ENTRY_STOP}% 이내 · 추세 상승/혼조)\n"
                 "참고용이에요. 오른다는 보장은 아니고, 성적표로 확인 중이에요.")
         msg = head + "\n\n" + "\n\n".join(entries)
-        telegram(token, chat, (btc + "\n\n" if btc else "") + msg)
+        telegram(token, chat, (btc + "\n\n" if (btc and not first_sent) else "") + msg)
+        first_sent = True
     if parts:
-        if btc and not entries:
+        if btc and not first_sent:
             parts.insert(0, btc)
         telegram(token, chat, "\n\n\n".join(parts))
-    elif first and not entries:
+    elif first and not first_sent:
         telegram(token, chat, "✅ RSI 알림이 켜졌어요. 조건에 맞는 코인이 나오면 알려 드려요.")
 
     # 매일 아침 성적표
