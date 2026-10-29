@@ -65,6 +65,15 @@ def rsi(closes, n):
     return out
 
 
+def rsi_now(closes):
+    """지금 RSI 숫자 줄: 'RSI 38/45/48 (6/12/24)'"""
+    shown = []
+    for n in RSI_SHOW:
+        rr = rsi(closes, n)
+        shown.append(f"{rr[-1]:.0f}" if rr else "-")
+    return f"RSI {'/'.join(shown)} ({'/'.join(str(n) for n in RSI_SHOW)})"
+
+
 def ema(values, n):
     if len(values) < n + 1:
         return []
@@ -471,6 +480,7 @@ def main():
                 rs, rname, dd, hp = ctx_info(cs, closes)
                 vl = vol_text(vp, vx)                    # 거래량
                 cl = ctx_text(rs, rname, dd, hp)         # 위 저항 + 직전 고점 + 고점 대비
+                rt = rsi_now(closes)                     # RSI 숫자 줄
 
                 found = []   # (종류, 문구, 접는 선 거리%)
                 r = rsi(closes, RSI_SIGNAL)
@@ -491,7 +501,7 @@ def main():
                         above = (closes[-1] / e[-1] - 1) * 100
                         if above <= EMA_MAX_PCT:
                             st, sl = stop_info(cs, closes[-1], e[-1] * 0.998)
-                            mid = f"EMA{n} 위 +{above:.1f}%  이번봉 {chg:+.1f}%"
+                            mid = f"EMA{n} 위 +{above:.1f}%  이번봉 {chg:+.1f}%\n{rt}"
                             dl = day_line(bar, tr, daily_trend(inst), label)
                             found.append((f"ema{n}", block(name, dl, mid, vl, cl, st), sl))
 
@@ -514,7 +524,7 @@ def main():
                                 btag = "진행중" if mode == "live" else "마감확정"
                                 st, sl = stop_info(cs, closes[-1], e20[-1] * 0.998)
                                 mid = (f"저점 대비 +{rise:.1f}%  EMA뭉침 {squeeze:.1f}%\n"
-                                       f"최근고점 +{spike:.1f}%  이번봉 {chg:+.1f}%")
+                                       f"최근고점 +{spike:.1f}%  이번봉 {chg:+.1f}%\n{rt}")
                                 dl = day_line(bar, tr, daily_trend(inst), label)
                                 btext = block(name, dl, mid, vl, cl, st)
                                 bases.append(f"[{label}·{btag}]\n" + btext)
